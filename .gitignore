@@ -1,11 +1,23 @@
-*.exe
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+
+# Secrets & env
 .env
+notes.md
+
+# Data (private or generated)
 data/private/
 out_private_data/
+*.npz
+*.parquet
 
-# Data files (keep out of repo)
-data/**/*.csv
-data/**/*.json
-out_private_data/
-out_private_data/**/*.csv
-out_private_data/**/*.json
+# Notebooks
+*.ipynb_checkpoints/
+
+# Large binaries
+*.exe
+

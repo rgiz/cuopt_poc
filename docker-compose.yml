@@ -1,43 +1,31 @@
+# docker-compose.yml
 services:
-  cuopt:
-    image: nvidia/cuopt:25.10.0a-cuda12.8-py3.12
-    gpus: all
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    # For dev we expose 5000; in prod we will override this to **[]** to hide it.
-    ports:
-      - "5000:5000"
-
-  api:
+  backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      - CUOPT_URL=http://cuopt:5000
-      - CUOPT_SOLVE_PATH=/cuopt/request
-      - PRIVATE_DATA_DIR=/data/private
-      - CORS_ALLOW_ORIGINS=http://localhost:8501
+      DATA_ROOT: ${DATA_ROOT:-/data}
+      CUOPT_SOLVER_TIMEOUT_SEC: ${CUOPT_SOLVER_TIMEOUT_SEC:-120}
+      CUOPT_URL: ${CUOPT_URL:-}         # leave empty to use local (in-process) solver
     volumes:
-      # Private data is bind-mounted read-only (works in dev and prod)
-      - ./data/private:/data/private:ro
-    read_only: true
-    tmpfs:
-      - /tmp
-    ports:
-      - "8000:8000"
-    # Default (prod-style) command; dev will override with --reload
-    command: ["uvicorn","backend.main_miles:app","--host","0.0.0.0","--port","8000"]
+      - ./:/app
+      - ${DATA_ROOT:-/data}:/data       # WRITEABLE!
+    gpus: all
+    restart: unless-stopped
+    # no ports: backend is reachable as http://backend:8000 from UI container
 
   ui:
     build:
       context: .
       dockerfile: ui/Dockerfile
-    depends_on:
-      api:
-        condition: service_started  # dev keeps this; prod will upgrade to healthy
     environment:
-      - API_BASE_URL=http://api:8000   # <— use the service name, not localhost
-      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+      API_BASE_URL: ${API_BASE_URL:-http://backend:8000}
     ports:
-      - "8501:8501"
+      - "127.0.0.1::8501"               # random free host port -> container 8501
+    depends_on:
+      backend:
+        condition: service_started
+    volumes:
+      - ./:/app
+    restart: unless-stopped

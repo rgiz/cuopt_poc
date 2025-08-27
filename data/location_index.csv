@@ -1,0 +1,582 @@
+name,center_id
+Aberdeen Mail Centre,0
+Scottish Hub,1
+Edinburgh Airport,2
+Peterhead DO,3
+Aberdeen LD,4
+OBL Services,5
+Fraserburgh DO,6
+Bridgend VOC,7
+Amazon Swansea Bay (CWL1) SA1 8QX,8
+Swansea Mail Centre,9
+Cardiff Mail Centre,10
+Newport West DO,11
+Ferndale DO,12
+Amazon Bristol (SBS2)  BS11 0YH,13
+South West Hub,14
+Bridgend CF DO,15
+Newport East DO,16
+Midlands Super Hub,17
+Princess Royal Hub,18
+Birmingham Mail Centre,19
+National Distribution Centre,20
+Bristol Mail Centre,21
+Jubilee Mail Centre,22
+Amazon Bristol  (BRS1)   BS35 4DJ,23
+Swindon VOC,24
+Bristol AP (BS34 5DJ),25
+Coventry National Hub,26
+Swansea LD,27
+Newport LD,28
+Nisbets St Brendans BS11 9HA,29
+Gloucester LD,30
+Coventry International Hub,31
+Exeter Mail Centre,32
+East Midlands Airport,33
+Nisbets Main Site BS11 8TB,34
+Cardiff North DO,35
+Northern Ireland Mail Centre,36
+Belfast LD,37
+Craigavon Portadown DO,38
+Larne Docks,39
+Belfast Airport,40
+Belfast East BT5 And BT6 DO,41
+Enniskillen DO,42
+Belfast Docks,43
+Belfast North DO,44
+City Electrical Factors SG9 9ER,45
+National Return Centre,46
+AMAZON (STN8)  MK17 7AB,47
+GLS Ireland Dublin Depot,48
+Hereford DO,49
+North West Hub,50
+Inditex Returns (NN4 5EL),51
+Worcester DO,52
+Amazon Bardon (BHX2) (LE67 1GQ),53
+PHS Direct (B46 1HQ),54
+Brierley Hill DO,55
+Pro Direct Sport,56
+Mod Donnington TF1 7AE,57
+Mail & Marketing Solutions  (BD4 9SW),58
+TTS RMER (NG15 6XJ),59
+ED Logistics,60
+World of Books  (CV3 4PW),61
+Screwfix ST14 8LP,62
+Specialist Crafts Ltd LE4 9HQ,63
+Tamworth DO,64
+Cool Solutions,65
+Roman Originals (B24 9QP),66
+Beeswift Limited (B6 7EU),67
+NW Midlands Mail Centre,68
+Amazon (EMA4) (B76 9AA),69
+Burton On Trent DO,70
+Shop Direct OL9 8PW,71
+Hallmark LE13 1BS,72
+Rotherham LD,73
+DHL Warehousing CV6 4QG ,74
+Coleshill DO,75
+Supersmart (WS9 8DT),76
+GSP Geodis WS13 8UR,77
+Slimming world  DE55 2JJ,78
+Leicester Central DO,79
+South Midlands Mail Centre,80
+Leeds Mail Centre,81
+CBF Fulfilment Ltd (GL1 2BX),82
+North West Processing Centre,83
+Birmingham AP Site (B98 9NA),84
+Barnsley DO,85
+Costco NN6 7TZ,86
+Oldbury DO,87
+Abstrakt Services Ltd,88
+Liverpool LD,89
+Preston Mail Centre,90
+FCS Lasermail B24 9QL,91
+Basingstoke LD,92
+Sheffield Mail Centre,93
+Home Counties North MC,94
+Nottingham Mail Centre,95
+Manchester Mail Centre,96
+Amazon Redditch BHX8  (B98 9AY),97
+Warrington Mail Centre,98
+Yorkshire Hub,99
+Chelmsford Mail Centre,100
+Peterborough Mail Centre,101
+Southampton Mail Centre,102
+GXO Toolstation Northampton (NN4 9FJ),103
+Nottingham LD,104
+Moonpig Tamworth (B78 2FG),105
+Selfridges B46 1DA,106
+Amazon Peterborough (EUK5) PE2 9EN,107
+Northampton Crow Lane DO,108
+Bromsgrove DO,109
+Preston LD,110
+Creo Fulfilment ME20 7NA,111
+Carlisle VOC,112
+Carlisle Mail Centre,113
+Cairnryan Docks,114
+Perth LD,115
+Rotherham Services,116
+Amazon NCL2  (TS22 ENG),117
+Newton Stewart DO,118
+Carlisle DO,119
+Dumfries DO,120
+Penrith DO,121
+Annan DO,122
+Workington DO,123
+Wigton DO,124
+Thornhill DO,125
+Loch Ryan Stranraer Docks,126
+Chester Mail Centre,127
+Glasgow Mail Centre,128
+Cockermouth DO,129
+Egremont DO,130
+Maryport DO,131
+Warrington Rail Terminal,132
+Edinburgh Mail Centre,133
+Amazon Darlington  (MME1)  DL1 4PG,134
+Birkenhead DO,135
+Leyland DO,136
+Diamond Comic Distributors (WA7 1SN),137
+Boux Avenue (CW1 6NA),138
+Shrewsbury AP PFW - Wednesbury BD,139
+Demon Tweeks LL13 9UG,140
+Amazon Bolton  (MAN3)  BL5 1DB,141
+Nisbets Access 18 BS11 8HT,142
+Ingram Micros NN6 7EX,143
+Card Factory Gate 1 WF2 0XG,144
+Deeside LD,145
+Manchester LD,146
+Edinburgh LD,147
+Amazon St Helens   (MAN8)  WA11 9FS,148
+Glasgow LD,149
+Braintree DO,150
+Bury St Edmunds DO,151
+Brightlingsea DO,152
+Hadleigh DO,153
+Harlow DO,154
+Southend On Sea DO,155
+Romford Mail Centre,156
+SEDC VOC,157
+Chelmsford DO,158
+Basildon DO,159
+Sudbury DO,160
+London Central Mail Centre,161
+Seasalt (RM18 7HD),162
+Denny Enterprises  KA13 6PT,163
+Amazon Tilbury RM18 7AN,164
+Stubbins Food Partnerships EN8 7LU,165
+London East LD,166
+Delta Global Source LE8 6ZG,167
+Ipswich LD,168
+South East Processing Centre - Hatfield PF,169
+Manx Independent Carriers (WN8 9QE),170
+Photobox NW10 7AQ,171
+Clacton On Sea DO,172
+Ilford DO,173
+North Essex LD,174
+Amazon Dartford LCY3 (DA1 5PZ),175
+Whitechapel DO,176
+Cambridge LD,177
+Greenford Mail Centre,178
+Harold Hill DO,179
+Grays DO,180
+Heathrow Worldwide DC,181
+Amazon Dunstable (LTN4) LU5 4FE ,182
+Croydon Mail Centre,183
+Milton Keynes Storage,184
+Greenwich DO,185
+Beckenham DO,186
+Bromley DO,187
+Medway Mail Centre,188
+LTS Distribution,189
+London South East LD,190
+Southwark DO,191
+London Central LD,192
+Croydon DO,193
+Amazon Milton Keynes (LTN1) MK43 0ZA,194
+Tropic Skincare  (CR0 4TQ),195
+TK Maxx (DHL) (CV23 0XF),196
+Tonbridge LD,197
+Air Canada TW6 3JJ,198
+Heathrow Airport,199
+Cathay Pacific M90 5SA,200
+American Airlines TW4 6NF,201
+Dnata TW6 3ET,202
+Guernsey Docks,203
+Albert Johnson Quay PO2 7AE,204
+Swissport TW6 3PR,205
+British Airways TW6 2,206
+Dar Lighting Limited OX16 3JZ,207
+John Lewis  MK14 5BT,208
+Cromwell Tools LE18 2FS,209
+Shires Equestrian HR6 0QF,210
+Stirlandpaterson DE7 4RA,211
+Holland and Barrett (DE14 2WP),212
+Leicester LD,213
+Carnal Logistics,214
+Amazon Rugby (BHX5)   CV23 0WE,215
+Amazon Daventry (BHX3) NN11 8QL,216
+Worcester LD,217
+Tyldesley DO,218
+Cambridge Weight Plan Ltd (NN17 5JE),219
+Nisbets Third Way BS11 9YL,220
+Poole LD,221
+Cromwell Tools LE8 6HP,222
+Avon Cosmetics (NN17 4AZ),223
+Howard Tennets (LE17 4XW),224
+Lockhart Catering  (RG7 4XE),225
+White Stuff Ltd LE19 1SU,226
+Gardners Books Ltd (BN23 6QH),227
+Gatwick LD,228
+Ship It Appliances (M50 1RE),229
+Leeds LD,230
+Milton Keynes LD,231
+DHL Cargo (DE74 2TR),232
+WH Smith B6 7BH,233
+Briggs Industrial Footwear   LE4 9LE,234
+Oxford LD,235
+Hereford LD,236
+UPS EMA Air Hub (DE74 2BQ),237
+Exeter LD,238
+Solent LD,239
+Newcastle LD,240
+Exeter VOC,241
+Lincoln LD,242
+London West LD,243
+Norwich LD,244
+Cleveland LD,245
+Amazon Hinckley Park BHX7 (LE10 3FF),246
+Atherstone International,247
+Amazon EMA2 (NG17 NB),248
+Bleckmann (DE14 2AB),249
+Decathlon Logistics (NN4 7HT),250
+Downton Ltd GL2 4PA,251
+Sky Broadband CV21 1DZ,252
+Red Funnel SO14 2AQ,253
+Southampton VOC,254
+GXO Logistics (DE7 6HE),255
+Amazon Coventry  (BHX4)  CV5 9DQ,256
+Bathgate DO,257
+Perth Hub,258
+Edinburgh East DO,259
+Glenrothes DO,260
+Kirkcaldy DO,261
+Grangemouth DO,262
+Stirling DO,263
+Dundee West DO,264
+East Midlands VOC,265
+Barnard Castle DO,266
+Sports Direct (NG20 8RY),267
+Opex Logistics,268
+Dimensions (NG10 1FZ),269
+Thorntons Chocolates DE55 4XJ,270
+Eden Springs UK Ltd,271
+Amazon Derby  (EMA1)  DE74 2DL ,272
+Clifton NG DO,273
+Coloured Rocks B98 9HF,274
+Joma Jewellery (OX16 2SP),275
+Bulwell DO,276
+Amazon Glenfield (XLH1 )  LE3 8JS,277
+Coventry South DO,278
+Linneys Suppliers/ITS (EN11 0DY),279
+Living On Line NG10 5AD,280
+Flowerline NG21 0RU,281
+Cornwall LD,282
+Torquay DO,283
+Newton Abbot DO,284
+Harrier TQ12 4UH,285
+Bideford DO,286
+Barnstaple DO,287
+Dorset Mail Centre,288
+Truro Mail Centre,289
+Plymouth Mail Centre,290
+Plymouth LD,291
+Falmouth DO,292
+Paragon DC - Whistl Fulfilment (LE17 4XZ),293
+Cumbernauld DO,294
+Ayr DO,295
+Troon DO,296
+Gatwick Mail Centre,297
+Hove DO,298
+Westham DO,299
+Brighton DO,300
+Eastbourne DO,301
+Seaford DO,302
+Lewes DO,303
+Hailsham DO,304
+Littlehampton DO,305
+Accelerated Mailing RH15 8QY,306
+International PSC,307
+Burgess Hill DO,308
+Goring On Sea DO,309
+Pure Ltd (RH15 9TJ),310
+Hassocks DO,311
+Gaugemaster (BN18 0BF),312
+Hastings DO,313
+Horsham DO,314
+The Body Shop  BN17 6LS ,315
+DFS Worldwide,316
+Woking Storage,317
+Aldershot LD,318
+Canterbury DO,319
+Tonbridge DO,320
+Polegate DO,321
+Henfield DO,322
+Lancing DO,323
+Hitchin DO,324
+Letchworth DO,325
+Watford DO,326
+Globexair   UB2 5LF,327
+Dunstable DO,328
+Tottenham DO,329
+Wurth Uk Ltd DA18 4AE,330
+ML Accessories (LU5 4LT),331
+Perfume Shop (LU5 4RZ),332
+Levi Strauss  (NN4 9BA),333
+Wednesbury Branch Direct Hub,334
+Business  Design  Centre N1 0QH,335
+GXO Abercrombie & Fitch (NN10 0FN),336
+XPO Logistics M50 1RE,337
+Fulfilment Store  CV21 1 B,338
+Medway LD,339
+Reading LD,340
+Amazon Rochester (LCY8) (ME3 9GX),341
+East London PSC,342
+Slough DO,343
+Uxbridge DO,344
+Transworld TW5 9QA,345
+Speciality Drinks Ltd NW10 7SU,346
+Norwich Mail Centre,347
+Guildford DO,348
+Swindon Mail Centre,349
+Swindon WBC,350
+Gee Force Logistics (LE8 6LH),351
+Evre Limited UB2 4BD,352
+The Jewellery Channel TW13 7HF,353
+London Camden DO,354
+WRT RDC Delivery,355
+Maidenhead DO,356
+London South West LD,357
+BFPO Northolt HA4 6DQ,358
+Swissport TW6 3LW,359
+Dnata Cargo Westpoint (TW19 7LX),360
+Linnells  CM3 3BE,361
+Twinmar Ltd (HP2 7EA),362
+DHL Globalmatch SL3 8AG,363
+OCS SL3 0AY,364
+Amazon Seko  TW20 8EY,365
+J A S Forwarding (TW14 8EE),366
+Mint Velvet (MK10 0BB),367
+Amazon Swindon BRS2 (SN3 4DB),368
+Sainsburys Distribution Bedford (MK43 9AA),369
+Inverness Mail Centre,370
+Forres DO,371
+Fort William DO,372
+Kyle DO,373
+Portree DO,374
+Inverness LD,375
+Alnwick DO,376
+Elgin DO,377
+Thurso DO,378
+Nairn DO,379
+Monsoon  Ltd NN8 2DH,380
+Portsmouth DO,381
+Tyneside Mail Centre,382
+Pharmacy 2U (LE67 1GQ),383
+Advanced Direct DY2 9RE,384
+Book Brothers (Price Cut Books Ltd)(LE4 1ET),385
+Wincanton DO,386
+The White Company NN4 9BB,387
+House Of Fraser MK15 0DB,388
+DK Fulfilment CV6 5RE,389
+Fedex Express,390
+Heysham (S),391
+Amazon Coalville (SNG1) LE67 1PD,392
+Winit LE3 8DX,393
+Amethyst Logistics (2B&C Logistics ) (CV35 9JY),394
+River Island - Clipper Logistics PLC (NG22 9LD),395
+Fairway Logistics SL3 8DS,396
+Synergy (RH15 9NB),397
+W H Peacock (MK42 0PE),398
+Orange Connex Global (SF Express) (WS8 7DG),399
+Milton Keynes PSC,400
+New Look (ST5 9QG),401
+Guernsey Airport,402
+IFORCE JOHN LEWIS (NN18 8ET),403
+Atherstone PSC,404
+Manchester VOC,405
+Amazon Altrincham (MAN1) (M90 5AA),406
+Data Image Group Ltd LE19 2GP,407
+Manchester Branch Direct Hub,408
+Amazon Warrington (MAN2) WA5 3XA,409
+Amazon Knowsley (LPL2) (L33 7AP,410
+Coulby Newham DO,411
+Pinnacle Health Ltd PE7 3EL,412
+South Shields DO,413
+Darlington DO,414
+Sunderland DO,415
+Amazon Durham MME2 (DH6 5FG),416
+Stockton On Tees DO,417
+Newcastle Upon Tyne City DO,418
+North Tyneside DO,419
+Amazon Gateshead (NCL1 DNE2)   ,420
+Metromail SR7 7DN,421
+Hartlepool DO,422
+Northallerton DO,423
+Great Yarmouth DO,424
+Bowthorpe DO,425
+Lowestoft DO,426
+Cotswold Outdoor SN16 9SH,427
+Yours Clothing (PE2 6XU),428
+Delicious Marketing M17 1NR,429
+Haydock Trailer Park,430
+Prestige Flowers CO15 4AD,431
+Wigan DO,432
+Express Gifts Returns M35 0HJ,433
+The Hut Group (THG) (WA5 3TP),434
+Altrincham DO,435
+B Fashion Ltd LE11 1HL,436
+Wenritt (BL3 5PT),437
+Rossendale DO,438
+Kleeneze OL10 2TT,439
+Askews and Holt Library Services (PR1 1SY),440
+Crewe DO,441
+Jackson Art Supplies (GL2 2FN),442
+JD Sports,443
+Oakwood Dist BL5 3XU,444
+Amazon Doncaster (LBA4) DN11 0BF,445
+Woodstock Trading HR2 6LB,446
+Hyde DO,447
+Congleton DO,448
+RS Components CV10 7RS,449
+Fulfilment Warehouse GL54 2HQ,450
+PFS GLOBAL SO18 - Pandora,451
+Doncaster DO,452
+Stockport Central DO,453
+Bramhall DO,454
+Liverpool South DO,455
+Deeside DO,456
+Cambridge DO,457
+Boston DO,458
+Skegness DO,459
+Peterborough DO,460
+Geodis Wilson UK Ltd (TW15 1XS),461
+Warners PE10 9PH,462
+Kings Lynn DO,463
+Oxford University Press (OUP) NN14 1UA,464
+Russell Hume L24 9JT,465
+Sleaford DO,466
+Hotel Chocolat PE29 7HF,467
+Jellycat (CB21 4SF),468
+Grantham DO,469
+Penzance DO,470
+St Austell DO,471
+St Ives PE DO,472
+Bristol Branch Direct Hub,473
+Bullet Express,474
+Browns Group,475
+Harrow DO,476
+Ashtead DO,477
+West Wimbledon DO,478
+Blackpool DO,479
+Chorley DO,480
+Burnley DO,481
+Southport DO,482
+Toolstation TA6 4RN,483
+Bolton North DO,484
+Kilmarnock DO,485
+Shotts DO,486
+Paisley DO,487
+Inverclyde DO,488
+BT Returns (KY7 4UA),489
+NRG Direct Mail Ltd  SY21 7DF,490
+Amazon Dunfermline (EDI4) KY11 8ST,491
+Oban DO,492
+Glasgow PFW AP Site,493
+Sevenoaks DO,494
+Belvedere DO,495
+Andover DO,496
+Maidstone DO,497
+Bexleyheath DO,498
+Ramsgate DO,499
+Ashford TN DO,500
+Medway Valley DO,501
+Buy Whole Foods On Line Ltd (CT12 4HY),502
+West Thurrock Branch Direct Hub,503
+Rainham ME DO,504
+Owens Road Services,505
+Chatham DO,506
+Bracknell DO,507
+Basingstoke DO,508
+Reading West DO,509
+Banbury DO,510
+Oxford East DO,511
+Pangbourne DO,512
+Reading East DO,513
+Abingdon DO,514
+Witney DO,515
+Bicester DO,516
+Oxford DO,517
+Newbury DO,518
+Thatcham DO,519
+Swindon Trailer Park,520
+Chippenham DO,521
+Nationwide SN2 1EL,522
+Epsom Branch Direct Hub,523
+Ryde DO,524
+Newport IOW DO,525
+Sandown DO,526
+West Coast Ltd (RG7 4AH),527
+Amazon  Methley DSA6 (LS26 9FT),528
+Amazon Nottingham (EMA3)  NG16 3UA,529
+Amazon Doncaster (LBA2) DN11 0BG,530
+Hull Malmo Road DO,531
+AMAZON LBA5,532
+North East PSC VOC,533
+UK Greetings Cannon Way (WF13 1XH),534
+UK Greetings Bretton Park (WF12 9BS),535
+HOBBYCRAFT (DE14 2WA),536
+York LD,537
+Amazon  Chesterfild (MAN4)  S43 4PZ,538
+Leeds Branch Direct Hub,539
+Weston Super Mare DO,540
+Taunton DO,541
+Gloucester North DO,542
+Frome DO,543
+Bath DO,544
+Gardiner Bros (GL2 4PH),545
+Supersmart Site 3  (WS13 8NQ),546
+Paragon Bristol (BS32 0GE),547
+Westbury DO,548
+Trowbridge DO,549
+PFS Global,550
+Neopost Technologies Ltd IG10 3TZ,551
+Bristol Fishponds DO,552
+Bristol East Central DO,553
+Bootle and Seaforth DO,554
+Mosaic Fulfilment Solutions (CW7 3PZ),555
+Staines DO,556
+Camberley DO,557
+Game Digital RG21 6YJ,558
+Marcol Limited,559
+Feltham DO,560
+Stoke on Trent DO,561
+Shred It (SN3 4WB),562
+Palletways  (WS13 8NE),563
+First Mailing MK3 7QT,564
+Lincoln DO,565
+Manvers DO,566
+Wakefield DO,567
+Granby Marketing BB1 3BW,568
+Scunthorpe DO,569
+Sheffield City DO,570
+Birch Park DO,571
+Immingham DO,572
+Grimsby DO,573
+Hull Central DO,574
+The Very Group  (DE74 2BB),575
+PD Bannister,576
+Hughes Electrical (IP24 1HT),577
+Bradford South DO,578
+York Central DO,579
+Goole DO,580
