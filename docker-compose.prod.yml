@@ -1,0 +1,35 @@
+services:
+  cuopt:
+    # Hide cuOpt from the host in prod (API talks to it internally)
+    ports: []
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 - <<'PY'\nimport urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/v2/health/live', timeout=3).read(); print('ok')\nPY"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  api:
+    restart: unless-stopped
+    depends_on:
+      cuopt:
+        condition: service_healthy
+    env_file:
+        - .env
+    healthcheck:
+      test: ["CMD-SHELL", "python3 - <<'PY'\nimport urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read(); print('ok')\nPY"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # Use the non-reload command from base file (no override needed)
+    # No source mounts in prod (immutable image); base already has only data volume
+
+  ui:
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      environment:
+      - API_BASE_URL=http://api:8000   # <— use the service name, not localhost
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true

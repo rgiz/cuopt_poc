@@ -1,0 +1,10 @@
+fastapi==0.111.0
+uvicorn==0.30.0
+pydantic==2.7.0
+numpy>=1.26
+pandas>=2.2
+requests>=2.32
+python-multipart>=0.0.9
+aiofiles>=23.2
+requests>=2.31,<2.33
+msgpack>=1.0.5

@@ -1,0 +1,43 @@
+services:
+  cuopt:
+    image: nvidia/cuopt:25.10.0a-cuda12.8-py3.12
+    gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    # For dev we expose 5000; in prod we will override this to **[]** to hide it.
+    ports:
+      - "5000:5000"
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      - CUOPT_URL=http://cuopt:5000
+      - CUOPT_SOLVE_PATH=/cuopt/request
+      - PRIVATE_DATA_DIR=/data/private
+      - CORS_ALLOW_ORIGINS=http://localhost:8501
+    volumes:
+      # Private data is bind-mounted read-only (works in dev and prod)
+      - ./data/private:/data/private:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "8000:8000"
+    # Default (prod-style) command; dev will override with --reload
+    command: ["uvicorn","backend.main_miles:app","--host","0.0.0.0","--port","8000"]
+
+  ui:
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+    depends_on:
+      api:
+        condition: service_started  # dev keeps this; prod will upgrade to healthy
+    environment:
+      - API_BASE_URL=http://api:8000   # <— use the service name, not localhost
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+    ports:
+      - "8501:8501"
