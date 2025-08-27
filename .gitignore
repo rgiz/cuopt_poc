@@ -2,3 +2,10 @@
 .env
 data/private/
 out_private_data/
+
+# Data files (keep out of repo)
+data/**/*.csv
+data/**/*.json
+out_private_data/
+out_private_data/**/*.csv
+out_private_data/**/*.json
