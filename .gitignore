@@ -1,0 +1,4 @@
+*.exe
+.env
+data/private/
+out_private_data/
