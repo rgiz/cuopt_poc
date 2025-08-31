@@ -5,12 +5,14 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
+      PYTHONPATH: /app
+      PRIVATE_DATA_DIR: /data            # <— critical
       DATA_ROOT: ${DATA_ROOT:-/data}
       CUOPT_SOLVER_TIMEOUT_SEC: ${CUOPT_SOLVER_TIMEOUT_SEC:-120}
-      CUOPT_URL: ${CUOPT_URL:-}         # leave empty to use local (in-process) solver
+    command: ["uvicorn","backend.main_miles:app","--host","0.0.0.0","--port","8000"]
     volumes:
       - ./:/app
-      - ${DATA_ROOT:-/data}:/data       # WRITEABLE!
+      - ${DATA_ROOT:-/data}:/data
     gpus: all
     restart: unless-stopped
     # no ports: backend is reachable as http://backend:8000 from UI container
