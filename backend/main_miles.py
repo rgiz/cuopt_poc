@@ -2,32 +2,6 @@
 """
 Backend (miles edition) for the Dynamic Trip Rescheduling demo.
 
-- Expects private data in a directory (env PRIVATE_DATA_DIR, default ./data/private)
-  * distance_miles_matrix.npz
-  * time_minutes_matrix.npz
-  * location_index.csv   (columns: name,center_id[,postcode,lat,lon])
-  * driver_states.json   (optional, but recommended)
-
-- Cost model is read from environment via ENV_COMPAT_SNIPPET.read_cost_env_defaults()
-  Supported env (examples): DELAY_COST_PER_MIN, DEADHEAD_COST_PER_MILE, OUTSOURCING_PER_MILE, OVERTIME_COST_PER_MINUTE, etc.
-
-- POST /solve payload:
-  {
-    "disrupted_trips": [ { "id": "...", "start_location": "...", "end_location": "...",
-                           "duration_minutes": 123, "trip_miles": 148.0, ... }, ... ],
-    "candidates_per_trip": { "<trip_id>": [ { "driver_id": "...", "type": "reassigned",
-                           "deadhead_miles": 3.2, "overtime_minutes": 15, ... }, ... ] },
-    "params": { "cost_weight": 0.5, "service_weight": 0.5 }   # optional
-  }
-
-- Returns:
-  {
-    "objective_value": 1234.56,
-    "assignments": [ { "trip_id": "...", "type": "reassigned" | "outsourced",
-                       "driver_id": "X" | null, "cost": 42.0, ... }, ... ],
-    "details": { "backend": "cuopt_http-miles+overtime" | "greedy-miles+overtime", ... }
-  }
-
 Run locally:
   uvicorn backend.main_miles:app --host 0.0.0.0 --port 8000
 """
@@ -35,47 +9,39 @@ Run locally:
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-
-THIS_FILE = Path(__file__).resolve()
-ROOT = THIS_FILE.parents[1]   # /app
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 import json
 import os
+import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter
-from urllib.parse import urljoin
-import requests, time, os
-from fastapi import FastAPI, HTTPException
+import requests
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from backend.plan_routes import create_router as create_plan_router
-from opt.cuopt_model_miles import CuOptModel
+from urllib.parse import urljoin
+from src.plan.router import create_router as create_plan_router
 
-# Make sure we can import src/opt/*
+# --------------------------------------------------------------------------------------
+# Import path setup (repo root + src/*)
+# --------------------------------------------------------------------------------------
 THIS_FILE = Path(__file__).resolve()
-ROOT = THIS_FILE.parents[1]  # repo root
+ROOT = THIS_FILE.parents[1]          # repo root (/app)
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.append(str(SRC))
+for p in (str(SRC), str(ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-# Settings router
+# Settings route (unchanged)
 from backend.settings_routes import router as settings_router  # type: ignore
 
 # Cost env shim
 try:
     from backend.ENV_COMPAT_SNIPPET import read_cost_env_defaults  # type: ignore
 except Exception:
-    # Fallback to local file if not packaged
     sys.path.append(str(THIS_FILE.parent))
     from ENV_COMPAT_SNIPPET import read_cost_env_defaults  # type: ignore
 
@@ -85,30 +51,32 @@ try:
 except Exception:
     from opt.cuopt_model import CuOptModel  # type: ignore
 
-# ------------------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------------------
+# NEW: modular planner router
+from src.plan.router import create_router as create_plan_router
+
+# --------------------------------------------------------------------------------------
+# FastAPI app + global config
+# --------------------------------------------------------------------------------------
+DEBUG_API = os.getenv("DEBUG_API", "1") == "1"
+
+app = FastAPI(title="Dynamic Trip Rescheduling (cuOpt, miles)")
+
+@app.exception_handler(Exception)
+async def all_exc_handler(request, exc):
+    tb = traceback.format_exc()
+    payload = {"error": str(exc)}
+    if DEBUG_API:
+        payload["traceback"] = tb
+    return JSONResponse(status_code=500, content=payload)
+
+# Basic config / CORS
 BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data/private")).resolve()
-# If an "active" subfolder exists, use it; otherwise use BASE_DIR directly
 DATASET_DIR = BASE_DIR / "active" if (BASE_DIR / "active").exists() else BASE_DIR
 
 CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000")
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*")
-
-DISTANCE_FILE       = DATASET_DIR / "distance_miles_matrix.npz"
-TIME_FILE           = DATASET_DIR / "time_minutes_matrix.npz"
-LOC_INDEX_FILE      = DATASET_DIR / "location_index.csv"
-DRIVER_STATES_FILE  = DATASET_DIR / "driver_states.json"
-# DATASET_DIR = PRIVATE_DATA_DIR / os.getenv("DATASET_ID", "active")
-SLA_FILE = DATASET_DIR / "sla_windows.json"
-
-# ------------------------------------------------------------------------------
-# App (create FIRST, then add routes)
-# ------------------------------------------------------------------------------
-app = FastAPI(title="Dynamic Trip Rescheduling (cuOpt, miles)")
-admin = APIRouter(prefix="/admin", tags=["Admin"])
-
 allow_origins = [o.strip() for o in CORS_ALLOW_ORIGINS.split(",")] if CORS_ALLOW_ORIGINS else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
@@ -117,49 +85,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount other routers
 app.include_router(settings_router)
-plan_router = create_plan_router(lambda: DATA, lambda: COST_CONFIG, lambda: CUOPT_URL)  # NEW
-app.include_router(plan_router)
 
-# ------------------------------------------------------------------------------
+# Admin router (kept)
+admin = APIRouter(prefix="/admin", tags=["Admin"])
+
+# --------------------------------------------------------------------------------------
+# Files we expect in the private dataset folder
+# --------------------------------------------------------------------------------------
+DISTANCE_FILE       = DATASET_DIR / "distance_miles_matrix.npz"
+TIME_FILE           = DATASET_DIR / "time_minutes_matrix.npz"
+LOC_INDEX_FILE      = DATASET_DIR / "location_index.csv"
+DRIVER_STATES_FILE  = DATASET_DIR / "driver_states.json"
+LOCATIONS_CSV_FILE  = DATASET_DIR / "locations.csv"   # old RSL-style
+CENTERS_CSV_FILE    = DATASET_DIR / "centers.csv"     # new data_prep output
+
+# --------------------------------------------------------------------------------------
 # Data loading helpers
-# ------------------------------------------------------------------------------
-def load_sla_windows() -> Dict[int, Dict[str, int]]:
-    """
-    Expected schema (keys can be strings or ints):
-    {
-      "1": {"depart_after_slack_min": 30,  "arrive_before_slack_min": 30},
-      "2": {"depart_after_slack_min": 90,  "arrive_before_slack_min": 90},
-      "3": {"depart_after_slack_min": 120, "arrive_before_slack_min": 120},
-      "4": {"depart_after_slack_min": 240, "arrive_before_slack_min": 240},
-      "5": {"depart_after_slack_min": 480, "arrive_before_slack_min": 480}
-    }
-    """
-    defaults = {
-        1: {"depart_after_slack_min": 30,  "arrive_before_slack_min": 30},
-        2: {"depart_after_slack_min": 90,  "arrive_before_slack_min": 90},
-        3: {"depart_after_slack_min": 120, "arrive_before_slack_min": 120},
-        4: {"depart_after_slack_min": 240, "arrive_before_slack_min": 240},
-        5: {"depart_after_slack_min": 480, "arrive_before_slack_min": 480},
-    }
-    try:
-        if SLA_FILE.exists():
-            raw = json.loads(SLA_FILE.read_text(encoding="utf-8"))
-            out = {}
-            for k, v in (raw or {}).items():
-                pk = int(k)
-                out[pk] = {
-                    "depart_after_slack_min": int(v.get("depart_after_slack_min", defaults.get(pk, {}).get("depart_after_slack_min", 120))),
-                    "arrive_before_slack_min": int(v.get("arrive_before_slack_min", defaults.get(pk, {}).get("arrive_before_slack_min", 120))),
-                }
-            # ensure all 1..5 exist
-            for pk, dv in defaults.items():
-                out.setdefault(pk, dv)
-            return out
-    except Exception as e:
-        print(f"[startup] WARN: failed to read sla_windows.json: {e}", flush=True)
-    return defaults
-
+# --------------------------------------------------------------------------------------
 def _load_npz_any(path: Path) -> np.ndarray:
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
@@ -168,11 +112,52 @@ def _load_npz_any(path: Path) -> np.ndarray:
         for k in ("matrix", "arr", "arr_0"):
             if k in z:
                 return z[k]
-        # fallback to first array
+        # fallback: first array
         for k in z.files:
             return z[k]
         raise ValueError(f"NPZ {path} contains no arrays.")
     return z  # npy array
+
+def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
+    """
+    Returns a DataFrame describing locations for geo metadata.
+    Prefers RSL-style 'locations.csv'. If absent, adapts 'centers.csv' to
+    the columns expected by src.plan.geo.build_loc_meta_from_locations_csv():
+      - "Mapped Name A", "From Site", "Lat_A", "Long_A", "Mapped Postcode A"
+    """
+    if LOCATIONS_CSV_FILE.exists():
+        try:
+            df = pd.read_csv(LOCATIONS_CSV_FILE)
+            # Make sure required columns exist—best effort; planner is robust to empties.
+            for c in ["Mapped Name A", "Lat_A", "Long_A"]:
+                if c not in df.columns:
+                    raise ValueError(f"locations.csv missing column '{c}'")
+            # Fill aliases if missing
+            if "From Site" not in df.columns:
+                df["From Site"] = df["Mapped Name A"]
+            if "Mapped Postcode A" not in df.columns:
+                df["Mapped Postcode A"] = None
+            return df
+        except Exception as e:
+            print(f"[startup] WARN: failed to read {LOCATIONS_CSV_FILE.name}: {e}", flush=True)
+            return None
+
+    if CENTERS_CSV_FILE.exists():
+        try:
+            c = pd.read_csv(CENTERS_CSV_FILE)
+            # Expected columns from data_prep: name, [postcode], [lat], [lon]
+            out = pd.DataFrame()
+            out["Mapped Name A"] = c.get("name", pd.Series(dtype=str)).astype(str)
+            out["From Site"] = out["Mapped Name A"]
+            out["Lat_A"] = pd.to_numeric(c.get("lat", pd.Series(dtype=float)), errors="coerce")
+            out["Long_A"] = pd.to_numeric(c.get("lon", pd.Series(dtype=float)), errors="coerce")
+            out["Mapped Postcode A"] = c.get("postcode", pd.Series(dtype=str))
+            return out
+        except Exception as e:
+            print(f"[startup] WARN: failed to adapt centers.csv: {e}", flush=True)
+            return None
+
+    return None
 
 def load_private_data() -> Dict[str, Any]:
     dist = _load_npz_any(DISTANCE_FILE)
@@ -193,7 +178,8 @@ def load_private_data() -> Dict[str, Any]:
     if tmat.shape != (n, n):
         raise ValueError(f"time_minutes_matrix shape {tmat.shape} incompatible with location_index size {n}")
 
-    location_to_index = dict(zip(li["name"], li["center_id"]))
+    # IMPORTANT: keys in uppercase (planner looks up with .upper())
+    location_to_index = {str(name).upper(): int(idx) for name, idx in zip(li["name"], li["center_id"])}
 
     # Driver states (optional)
     if DRIVER_STATES_FILE.exists():
@@ -204,40 +190,32 @@ def load_private_data() -> Dict[str, Any]:
     else:
         driver_states = {}
 
+    # Optional locations_df for geo meta
+    locations_df = _maybe_read_locations_df()
+
     return {
         "distance": dist,
         "time": tmat,
         "location_to_index": location_to_index,
         "driver_states": driver_states,
         "location_index_size": n,
+        "locations_df": locations_df,  # may be None; planner handles that
     }
 
-# ------------------------------------------------------------------------------
-# SELF TEST ENDPOINT
-# ------------------------------------------------------------------------------
-
+# --------------------------------------------------------------------------------------
+# Admin: cuOpt self-test
+# --------------------------------------------------------------------------------------
 def _safe_json(resp):
-    """Return (is_json, data_or_fallback). Never raises."""
     try:
         return True, resp.json()
     except Exception:
         return False, {"status_code": resp.status_code, "text": (resp.text or "")[:500]}
 
-def _ok(payload, status=200):
-    return JSONResponse(status_code=status, content={"ok": True, **payload})
-
-def _fail(step, base, extra=None, status=500):
-    out = {"ok": False, "step": step, "base": base}
-    if extra:
-        out.update(extra)
-    return JSONResponse(status_code=status, content=out)
-
-@app.get("/admin/cuopt_selftest")
+@admin.get("/cuopt_selftest")
 def cuopt_selftest():
-    
     ok = False
     step = "start"
-    meta = {}
+    meta: Dict[str, Any] = {}
     try:
         model = CuOptModel(
             driver_states=DATA["driver_states"],
@@ -248,9 +226,9 @@ def cuopt_selftest():
             server_url=CUOPT_URL,
             max_solve_time_seconds=10,
         )
-        ping = requests.get(urljoin(CUOPT_URL.rstrip('/')+'/','')).json()
+        ping = requests.get(urljoin(CUOPT_URL.rstrip('/')+'/', '')).json()
         step = "submit"
-        req_id = model._submit_request({"ping":"ok"})  # harmless payload
+        req_id = model._submit_request({"ping": "ok"})
         step = "poll"
         res = model._poll_result(req_id)
         ok = True
@@ -260,13 +238,11 @@ def cuopt_selftest():
 
 app.include_router(admin)
 
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Global state + lifecycle
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 DATA: Optional[Dict[str, Any]] = None
 COST_CONFIG = read_cost_env_defaults()
-
-SLA_WINDOWS = load_sla_windows()
 
 @app.on_event("startup")
 def _startup_try_load():
@@ -278,8 +254,6 @@ def _startup_try_load():
               f"locations={DATA['location_index_size']}", flush=True)
     except Exception as e:
         print(f"[startup] WARN: private data not loaded: {e}", flush=True)
-    # make SLA available to other routers/endpoints
-    app.state.sla_windows = SLA_WINDOWS
 
 def reload_private_data() -> Dict[str, Any]:
     global DATA, COST_CONFIG
@@ -291,19 +265,47 @@ def reload_private_data() -> Dict[str, Any]:
         "locations": DATA["location_index_size"],
         "has_driver_states": bool(DATA["driver_states"]),
         "cost_keys": list(COST_CONFIG.keys()),
+        "has_locations_df": DATA["locations_df"] is not None,
     }
 
 @app.post("/admin/reload")
 def admin_reload():
     info = reload_private_data()
-    global SLA_WINDOWS
-    SLA_WINDOWS = load_sla_windows()
-    app.state.sla_windows = SLA_WINDOWS
-    return {"status": "ok", "reloaded": {**info, "sla_keys": sorted(SLA_WINDOWS.keys())}}
+    return {"status": "ok", "reloaded": info}
 
-# ------------------------------------------------------------------------------
-# Pydantic models
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# Public health/config endpoints
+# --------------------------------------------------------------------------------------
+@app.get("/health")
+def health():
+    base = {
+        "status": "ok" if DATA is not None else "needs_data",
+        "private_data_dir": str(BASE_DIR),
+        "dataset_dir": str(DATASET_DIR),
+        "cuopt_url": CUOPT_URL,
+    }
+    if DATA is None:
+        return {**base, "message": "Private data not loaded. Upload/build and POST /admin/reload."}
+    return {
+        **base,
+        "distance_shape": list(DATA["distance"].shape),
+        "time_shape": list(DATA["time"].shape),
+        "locations": DATA["location_index_size"],
+        "has_driver_states": bool(DATA["driver_states"]),
+        "has_locations_df": DATA["locations_df"] is not None,
+    }
+
+@app.get("/config")
+def config():
+    return {
+        "cost_config": COST_CONFIG,
+        "cors_allow_origins": allow_origins,
+        "private_data_dir": str(BASE_DIR),
+    }
+
+# --------------------------------------------------------------------------------------
+# Solve (unchanged)
+# --------------------------------------------------------------------------------------
 class Candidate(BaseModel):
     candidate_id: Optional[str] = None
     driver_id: Optional[str] = None
@@ -352,36 +354,6 @@ class SolveResponse(BaseModel):
     assignments: List[Assignment]
     details: Dict[str, Any]
 
-# ------------------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------------------
-@app.get("/health")
-def health():
-    base = {
-        "status": "ok" if DATA is not None else "needs_data",
-        "private_data_dir": str(BASE_DIR),
-        "dataset_dir": str(DATASET_DIR),
-        "cuopt_url": CUOPT_URL,
-    }
-    if DATA is None:
-        return {**base, "message": "Private data not loaded. Upload/build and POST /admin/reload."}
-    return {
-        **base,
-        "distance_shape": list(DATA["distance"].shape),
-        "time_shape": list(DATA["time"].shape),
-        "locations": DATA["location_index_size"],
-        "has_driver_states": bool(DATA["driver_states"]),
-        "has_sla_windows": bool(app.state.sla_windows),
-    }
-
-@app.get("/config")
-def config():
-    return {
-        "cost_config": COST_CONFIG,
-        "cors_allow_origins": allow_origins,
-        "private_data_dir": str(BASE_DIR),
-    }
-
 @app.post("/solve", response_model=SolveResponse)
 def solve(req: SolveRequest):
     if DATA is None:
@@ -410,9 +382,25 @@ def solve(req: SolveRequest):
         details=sol.details,
     )
 
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# Include the NEW plan router (modular)
+# --------------------------------------------------------------------------------------
+# These callbacks give the planner access to the in-memory data & cost config
+def _get_data():
+    return DATA
+
+def _get_cost_config():
+    return COST_CONFIG
+
+def _get_cuopt_url():
+    return CUOPT_URL
+
+plan_router = create_plan_router(_get_data, _get_cost_config, _get_cuopt_url)
+app.include_router(plan_router)
+
+# --------------------------------------------------------------------------------------
 # Entrypoint
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
