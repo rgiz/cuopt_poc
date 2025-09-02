@@ -224,6 +224,44 @@ def create_router(
             "details": {"backend": "simple-greedy"},
             "candidates_considered": len(cands)
         }
+    
+    
+    @router.get("/locations")
+    def list_locations():
+        """
+        Return location names for UI autocompletion.
+
+        1) Prefer in-memory mapping (DATA["location_to_index"])
+        2) Else try CSVs in PRIVATE_DATA_DIR(/active) or /data
+        """
+        # 1) Try live memory
+        try:
+            DATA, M = _ensure_ready()
+            names = sorted({str(k).strip() for k in M.loc2idx.keys() if str(k).strip()})
+            return {"names": names, "count": len(names), "source": "memory"}
+        except HTTPException:
+            pass  # fall back to CSVs
+
+        # 2) CSV fallback
+        import os
+        import pandas as pd
+        from pathlib import Path
+
+        base = Path(os.getenv("PRIVATE_DATA_DIR", "/data")).resolve()
+        dataset = base / "active" if (base / "active").exists() else base
+
+        for fn in ("location_index.csv", "locations.csv"):
+            p = dataset / fn
+            if p.exists():
+                try:
+                    df = pd.read_csv(p)
+                    for col in ("name", "NAME", "site_name", "Site", "site", "location_id"):
+                        if col in df.columns:
+                            names = sorted({str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()})
+                            return {"names": names, "count": len(names), "source": str(p)}
+                except Exception as e:
+                    return {"names": [], "count": 0, "source": str(p), "error": f"read-failed: {e}"}
+        return {"names": [], "count": 0, "source": "none"}
 
     @router.get("/priority_map")
     def get_priority_map():

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from urllib.parse import urljoin
 from src.plan.router import create_router as create_plan_router
 
+
 # --------------------------------------------------------------------------------------
 # Import path setup (repo root + src/*)
 # --------------------------------------------------------------------------------------
@@ -70,7 +71,7 @@ async def all_exc_handler(request, exc):
     return JSONResponse(status_code=500, content=payload)
 
 # Basic config / CORS
-BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data/private")).resolve()
+BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data")).resolve()
 DATASET_DIR = BASE_DIR / "active" if (BASE_DIR / "active").exists() else BASE_DIR
 
 CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000")
@@ -395,7 +396,7 @@ def _get_cost_config():
 def _get_cuopt_url():
     return CUOPT_URL
 
-plan_router = create_plan_router(_get_data, _get_cost_config, _get_cuopt_url)
+plan_router = create_plan_router(lambda: DATA, lambda: COST_CONFIG, lambda: CUOPT_URL)
 app.include_router(plan_router)
 
 # --------------------------------------------------------------------------------------
