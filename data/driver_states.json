@@ -1,0 +1,53 @@
+{
+  "DUTY_001": {
+    "elements": [
+      {
+        "is_travel": true,
+        "element_type": "TRAVEL LEG",
+        "planz_code": "EMPTY",
+        "from": "BIRMINGHAM MAIL CENTRE",
+        "to": "MIDLANDS SUPER HUB",
+        "start_min": 630,
+        "end_min": 780,
+        "duration_min": 150,
+        "priority": 3,
+        "from_id": 19,
+        "to_id": 17
+      },
+      {
+        "element_type": "AS DIRECTED",
+        "from": "MIDLANDS SUPER HUB",
+        "to": "MIDLANDS SUPER HUB",
+        "start_min": 840,
+        "duration_min": 120,
+        "from_id": 17,
+        "to_id": 17
+      }
+    ],
+    "daily_windows": {
+      "Tue": {
+        "start_min": 540,
+        "end_min": 1080
+      }
+    }
+  },
+  "DUTY_002": {
+    "elements": [
+      {
+        "element_type": "AS DIRECTED",
+        "from": "BIRMINGHAM MAIL CENTRE",
+        "to": "BIRMINGHAM MAIL CENTRE",
+        "start_min": 600,
+        "duration_min": 180,
+        "from_id": 19,
+        "to_id": 19
+      }
+    ],
+    "daily_windows": {
+      "Tue": {
+        "start_min": 540,
+        "end_min": 1020
+      }
+    }
+  }
+}

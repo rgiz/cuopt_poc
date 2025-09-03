@@ -100,8 +100,11 @@ TIME_FILE           = DATASET_DIR / "time_minutes_matrix.npz"
 LOC_INDEX_FILE      = DATASET_DIR / "location_index.csv"
 DRIVER_STATES_FILE  = DATASET_DIR / "driver_states.json"
 LOCATIONS_CSV_FILE  = DATASET_DIR / "locations.csv"   # old RSL-style
-CENTERS_CSV_FILE    = DATASET_DIR / "centers.csv"     # new data_prep output
+CENTERS_CSV_FILE    = DATASET_DIR / "centers.csv"
 
+# --------------------------------------------------------------------------------------
+# Data loading helpers
+# --------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------
 # Data loading helpers
 # --------------------------------------------------------------------------------------
@@ -122,31 +125,31 @@ def _load_npz_any(path: Path) -> np.ndarray:
 def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
     """
     Returns a DataFrame describing locations for geo metadata.
-    Prefers RSL-style 'locations.csv'. If absent, adapts 'centers.csv' to
+    Prefers RSL-style 'locations.csv'. If absent or invalid, adapts 'centers.csv' to
     the columns expected by src.plan.geo.build_loc_meta_from_locations_csv():
       - "Mapped Name A", "From Site", "Lat_A", "Long_A", "Mapped Postcode A"
     """
+    # 1) Try RSL-style locations.csv
     if LOCATIONS_CSV_FILE.exists():
         try:
             df = pd.read_csv(LOCATIONS_CSV_FILE)
-            # Make sure required columns exist—best effort; planner is robust to empties.
-            for c in ["Mapped Name A", "Lat_A", "Long_A"]:
-                if c not in df.columns:
-                    raise ValueError(f"locations.csv missing column '{c}'")
-            # Fill aliases if missing
-            if "From Site" not in df.columns:
-                df["From Site"] = df["Mapped Name A"]
-            if "Mapped Postcode A" not in df.columns:
-                df["Mapped Postcode A"] = None
-            return df
+            need = {"Mapped Name A", "Lat_A", "Long_A"}
+            if need.issubset(df.columns):
+                if "From Site" not in df.columns:
+                    df["From Site"] = df["Mapped Name A"]
+                if "Mapped Postcode A" not in df.columns:
+                    df["Mapped Postcode A"] = None
+                return df
+            else:
+                # Present but wrong shape — we'll fall back to centers.csv below
+                print(f"[startup] INFO: {LOCATIONS_CSV_FILE.name} present but missing {need - set(df.columns)}; will try centers.csv", flush=True)
         except Exception as e:
-            print(f"[startup] WARN: failed to read {LOCATIONS_CSV_FILE.name}: {e}", flush=True)
-            return None
+            print(f"[startup] WARN: failed to read {LOCATIONS_CSV_FILE.name}: {e}; will try centers.csv", flush=True)
 
+    # 2) Fall back to centers.csv
     if CENTERS_CSV_FILE.exists():
         try:
             c = pd.read_csv(CENTERS_CSV_FILE)
-            # Expected columns from data_prep: name, [postcode], [lat], [lon]
             out = pd.DataFrame()
             out["Mapped Name A"] = c.get("name", pd.Series(dtype=str)).astype(str)
             out["From Site"] = out["Mapped Name A"]
@@ -156,7 +159,6 @@ def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
             return out
         except Exception as e:
             print(f"[startup] WARN: failed to adapt centers.csv: {e}", flush=True)
-            return None
 
     return None
 
@@ -202,6 +204,7 @@ def load_private_data() -> Dict[str, Any]:
         "location_index_size": n,
         "locations_df": locations_df,  # may be None; planner handles that
     }
+
 
 # --------------------------------------------------------------------------------------
 # Admin: cuOpt self-test
