@@ -257,6 +257,7 @@ def generate_candidates(
                 uses_emergency_rest=False,
                 feasible_hard=True,
                 est_cost=float(est_cost),
+                reason="As Directed",
             ))
 
         # Exact A->B swap
@@ -281,6 +282,7 @@ def generate_candidates(
                 deadhead_miles=0.0, deadhead_minutes=0.0, overtime_minutes=0.0,
                 miles_delta=0.0, delay_minutes=0.0, uses_emergency_rest=False,
                 feasible_hard=True, est_cost=float(admin_cost),
+                reason="Exact EMPTY A→B leg in window",
             ))
 
         # Append after last
@@ -302,6 +304,7 @@ def generate_candidates(
                 uses_emergency_rest=False,
                 feasible_hard=bool(feasible),
                 est_cost=float(est_cost),
+                reason="Appended after last leg",
             ))
 
     def rank_key(c: CandidateOut):

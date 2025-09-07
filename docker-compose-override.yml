@@ -1,0 +1,31 @@
+services:
+  api:
+    environment:
+      # Looser CORS in dev
+      CORS_ALLOW_ORIGINS: http://localhost:8501,http://ui:8501,*
+    volumes:
+      - ./:/app           # mount code for live reload
+      - ${DATA_ROOT:-/data}:/data
+    command: ["uvicorn","backend.main_miles:app","--host","0.0.0.0","--port","8000","--reload"]
+    # Optional live-sync (Compose v2.22+)
+    develop:
+      watch:
+        - action: sync
+          path: ./backend
+          target: /app/backend
+        - action: sync
+          path: ./src
+          target: /app/src
+        - action: rebuild
+          path: ./backend/requirements.txt
+    ports:
+      - "8000:8000"
+
+  ui:
+    environment:
+      API_BASE_URL: http://api:8000
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+    volumes:
+      - ./:/app
+    ports:
+      - "8501:8501"

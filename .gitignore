@@ -10,6 +10,7 @@ __pycache__/
 notes.md
 
 # Data (private or generated)
+data/
 data/private/
 out_private_data/
 *.npz
@@ -20,4 +21,3 @@ out_private_data/
 
 # Large binaries
 *.exe
-

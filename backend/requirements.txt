@@ -13,3 +13,6 @@ requests>=2.31,<2.33
 msgpack>=1.0.5
 pgeocode
 python-dateutil
+pytest
+responses
+python-multipart>=0.0.9

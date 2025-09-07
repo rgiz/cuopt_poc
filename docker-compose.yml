@@ -1,36 +1,51 @@
-# docker-compose.yml
 services:
-  backend:
+  cuopt:
+    image: ${CUOPT_IMAGE}
+    container_name: cuopt
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  api:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    container_name: api
     environment:
-      PYTHONPATH: /app
-      PRIVATE_DATA_DIR: /data            # <— critical
-      DATA_ROOT: ${DATA_ROOT:-/data}
-      CUOPT_SOLVER_TIMEOUT_SEC: ${CUOPT_SOLVER_TIMEOUT_SEC:-120}
-    # command: python -m uvicorn backend.main_miles:app --host 0.0.0.0 --port 8000
+      PYTHONPATH: /app:/app/src
+      DATA_ROOT: ${DATA_ROOT}
+      PRIVATE_DATA_DIR: ${PRIVATE_DATA_DIR}
+      PRIORITY_MAP_FILE: /data/priority_map.json
+      CUOPT_URL: http://cuopt:5000/v2
+      CUOPT_SOLVER_TIMEOUT_SEC: ${CUOPT_SOLVER_TIMEOUT_SEC}
+      CORS_ALLOW_ORIGINS: http://localhost:8501,http://ui:8501
     volumes:
       - ./:/app
-      - ${DATA_ROOT:-/data}:/data
-    gpus: all
-    restart: unless-stopped
+      - ${DATA_ROOT}:/data
+      - ${PRIVATE_DATA_DIR}:/data
+    command: ["uvicorn","backend.main_miles:app","--host","0.0.0.0","--port","8000","--reload"]
     ports:
       - "8000:8000"
-    # no ports: backend is reachable as http://backend:8000 from UI container
+    depends_on:
+      - cuopt
+    restart: unless-stopped
 
   ui:
     build:
       context: .
       dockerfile: ui/Dockerfile
+    container_name: ui
     environment:
-      API_BASE_URL: ${API_BASE_URL:-http://backend:8000}
-    command: streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+      API_BASE_URL: http://api:8000
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+    command: ["streamlit","run","ui/streamlit_app.py","--server.address=0.0.0.0","--server.port","8501"]
     ports:
-      - "127.0.0.1::8501"               # random free host port -> container 8501
+      - "8501:8501"
     depends_on:
-      backend:
-        condition: service_started
+      - api
     volumes:
       - ./:/app
     restart: unless-stopped

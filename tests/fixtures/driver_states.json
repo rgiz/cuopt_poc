@@ -1,0 +1,34 @@
+{
+  "drivers": {
+    "D1": {
+      "start_loc": "A",
+      "start_min": 8,
+      "end_min": 20,
+      "elements": [
+        {
+          "is_travel": true,
+          "from": "A",
+          "to": "B",
+          "start_min": 9,
+          "end_min": 11,
+          "priority": 3
+        }
+      ]
+    },
+    "D2": {
+      "start_loc": "B",
+      "start_min": 8,
+      "end_min": 20,
+      "elements": [
+        {
+          "is_travel": true,
+          "from": "B",
+          "to": "C",
+          "start_min": 12,
+          "end_min": 14,
+          "priority": 2
+        }
+      ]
+    }
+  }
+}
