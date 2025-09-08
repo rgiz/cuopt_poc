@@ -33,9 +33,9 @@ except ImportError:
     from ENV_COMPAT_SNIPPET import read_cost_env_defaults  # type: ignore
 
 try:
-    from opt.cuopt_model_miles import CuOptModel  # type: ignore
+    from src.opt.cuopt_model_miles import CuOptModel  # type: ignore
 except ImportError:
-    from opt.cuopt_model import CuOptModel  # type: ignore
+    from src.opt.cuopt_model import CuOptModel  # type: ignore
 
 from src.plan.router import create_router as create_plan_router
 

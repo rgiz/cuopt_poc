@@ -16,4 +16,5 @@ def read_cost_env_defaults():
         "outsourcing_base_cost": float(pick("OUTSOURCING_BASE_COST", default="200")),
         "outsourcing_per_mile": float(pick("OUTSOURCING_PER_MILE", default="2.0")),
         "overtime_cost_per_minute": float(pick("OVERTIME_COST_PER_MINUTE", default="1.0")),
+        "max_duty_minutes": float(pick("MAX_DUTY_MINUTES", default="780")),
     }

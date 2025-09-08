@@ -153,3 +153,56 @@ def client(app):
         assert r.status_code in (200, 204), f"[toy mode] /admin/reload failed: {r.status_code} {r.text}"
 
     return c
+
+# Add these fixtures to your existing tests/conftest.py file
+# (Don't replace the whole file, just add these at the end)
+
+@pytest.fixture(scope="session")
+def test_mode():
+    """Determine test mode from environment"""
+    return os.getenv("TEST_MODE", "unit").lower()
+
+@pytest.fixture(scope="session") 
+def cuopt_server():
+    """Provide cuOpt server URL if available"""
+    url = os.getenv("TEST_CUOPT_URL")
+    if url:
+        # Verify server is responsive
+        import requests
+        try:
+            resp = requests.get(f"{url}/health", timeout=5)
+            if resp.status_code == 200:
+                return url
+        except:
+            pass
+    return None
+
+@pytest.fixture(scope="session")
+def real_data_available():
+    """Check if real dataset is available"""
+    data_dir = Path(os.getenv("PRIVATE_DATA_DIR", "./data/private"))
+    required_files = [
+        "distance_miles_matrix.npz",
+        "time_minutes_matrix.npz", 
+        "location_index.csv"
+    ]
+    return all((data_dir / f).exists() for f in required_files)
+
+# Conditional test skipping
+def pytest_collection_modifyitems(config, items):
+    """Skip tests based on available resources"""
+    cuopt_available = os.getenv("TEST_CUOPT_URL") is not None
+    real_data_available = os.getenv("TEST_DATASET", "toy").lower() == "real"
+    
+    for item in items:
+        # Skip cuOpt tests if server not available
+        if "cuopt" in item.keywords and not cuopt_available:
+            item.add_marker(pytest.mark.skip(reason="cuOpt server not available"))
+        
+        # Skip real data tests if not available  
+        if "real_data" in item.keywords and not real_data_available:
+            item.add_marker(pytest.mark.skip(reason="Real dataset not available"))
+        
+        # Skip performance tests in quick mode
+        if "performance" in item.keywords and os.getenv("PYTEST_QUICK"):
+            item.add_marker(pytest.mark.skip(reason="Skipping performance tests in quick mode"))

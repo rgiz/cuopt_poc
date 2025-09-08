@@ -1,0 +1,23 @@
+services:
+  cuopt-test:
+    image: ${CUOPT_IMAGE:-nvcr.io/nvidia/cuopt:latest}
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    ports:
+      - "5001:5000"
+    restart: on-failure
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      TEST_CUOPT_URL: http://cuopt-test:5000
+      TEST_DATASET: toy
+      PYTHONPATH: /app:/app/src
+    volumes:
+      - ./:/app
+      - ./test-data:/data
+    command: ["python", "-m", "pytest", "tests/", "-v", "--junitxml=/app/test-results.xml"]
+    depends_on:
+      - cuopt-test

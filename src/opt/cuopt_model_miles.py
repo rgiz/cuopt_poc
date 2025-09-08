@@ -269,63 +269,63 @@ def solve(self, disrupted_trips, candidates_per_trip, params=None) -> CuOptSolut
             note = f"cuOpt HTTP failed: {e}"
 
     # ---------- greedy fallback ----------
-    obj, assigns = self._greedy_solve(disrupted_trips, candidates_per_trip)
-    return CuOptSolution(
-        objective_value=float(obj),
-        assignments=assigns,
-        details={
-            "backend": "greedy-miles+overtime",
-            "note": note if note else "cuOpt disabled/undetected",
-            "cuopt_solve_path": self._solve_path,
-        },
-    )
+    # obj, assigns = self._greedy_solve(disrupted_trips, candidates_per_trip)
+    # return CuOptSolution(
+    #     objective_value=float(obj),
+    #     assignments=assigns,
+    #     details={
+    #         "backend": "greedy-miles+overtime",
+    #         "note": note if note else "cuOpt disabled/undetected",
+    #         "cuopt_solve_path": self._solve_path,
+    #     },
+    # )
 
-    # ---------- very simple greedy for demo ----------
-    def _greedy_solve(self, disrupted_trips, candidates_per_trip):
-        total = 0.0
-        all_assigns: List[Dict[str, Any]] = []
-        for trip in disrupted_trips:
-            tid = trip["id"]
-            cands = candidates_per_trip.get(tid, []) or []
-            # choose the feasible candidate with min 'est_cost', else outsource
-            best = None
-            for c in cands:
-                if isinstance(c, dict):
-                    feasible = c.get("feasible_hard", True)
-                    if feasible and (best is None or c.get("est_cost", 1e18) < best.get("est_cost", 1e18)):
-                        best = c
-            if best:
-                cost = float(best.get("est_cost", 0.0))
-                total += cost
-                all_assigns.append({
-                    "trip_id": tid,
-                    "type": "reassigned",
-                    "driver_id": best.get("driver_id"),
-                    "candidate_id": best.get("candidate_id"),
-                    "delay_minutes": float(best.get("delay_minutes", 0.0)),
-                    "uses_emergency_rest": bool(best.get("uses_emergency_rest", False)),
-                    "deadhead_miles": float(best.get("deadhead_miles", 0.0)),
-                    "overtime_minutes": float(best.get("overtime_minutes", 0.0)),
-                    "miles_delta": float(best.get("miles_delta", 0.0)),
-                    "cost": cost,
-                })
-            else:
-                # outsource baseline = base + per mile, if provided
-                base = float(self.cost.get("outsourcing_base_cost", 200.0))
-                per_mi = float(self.cost.get("outsourcing_per_mile", self.cost.get("outsourcing_cost_per_mile", 2.0)))
-                miles = float(trip.get("trip_miles", 0.0))
-                cost = base + per_mi * miles
-                total += cost
-                all_assigns.append({
-                    "trip_id": tid,
-                    "type": "outsourced",
-                    "driver_id": None,
-                    "candidate_id": "OUTSOURCE",
-                    "delay_minutes": 0.0,
-                    "uses_emergency_rest": False,
-                    "deadhead_miles": 0.0,
-                    "overtime_minutes": 0.0,
-                    "miles_delta": miles,
-                    "cost": cost,
-                })
-        return total, all_assigns
+    # # ---------- very simple greedy for demo ----------
+    # def _greedy_solve(self, disrupted_trips, candidates_per_trip):
+    #     total = 0.0
+    #     all_assigns: List[Dict[str, Any]] = []
+    #     for trip in disrupted_trips:
+    #         tid = trip["id"]
+    #         cands = candidates_per_trip.get(tid, []) or []
+    #         # choose the feasible candidate with min 'est_cost', else outsource
+    #         best = None
+    #         for c in cands:
+    #             if isinstance(c, dict):
+    #                 feasible = c.get("feasible_hard", True)
+    #                 if feasible and (best is None or c.get("est_cost", 1e18) < best.get("est_cost", 1e18)):
+    #                     best = c
+    #         if best:
+    #             cost = float(best.get("est_cost", 0.0))
+    #             total += cost
+    #             all_assigns.append({
+    #                 "trip_id": tid,
+    #                 "type": "reassigned",
+    #                 "driver_id": best.get("driver_id"),
+    #                 "candidate_id": best.get("candidate_id"),
+    #                 "delay_minutes": float(best.get("delay_minutes", 0.0)),
+    #                 "uses_emergency_rest": bool(best.get("uses_emergency_rest", False)),
+    #                 "deadhead_miles": float(best.get("deadhead_miles", 0.0)),
+    #                 "overtime_minutes": float(best.get("overtime_minutes", 0.0)),
+    #                 "miles_delta": float(best.get("miles_delta", 0.0)),
+    #                 "cost": cost,
+    #             })
+    #         else:
+    #             # outsource baseline = base + per mile, if provided
+    #             base = float(self.cost.get("outsourcing_base_cost", 200.0))
+    #             per_mi = float(self.cost.get("outsourcing_per_mile", self.cost.get("outsourcing_cost_per_mile", 2.0)))
+    #             miles = float(trip.get("trip_miles", 0.0))
+    #             cost = base + per_mi * miles
+    #             total += cost
+    #             all_assigns.append({
+    #                 "trip_id": tid,
+    #                 "type": "outsourced",
+    #                 "driver_id": None,
+    #                 "candidate_id": "OUTSOURCE",
+    #                 "delay_minutes": 0.0,
+    #                 "uses_emergency_rest": False,
+    #                 "deadhead_miles": 0.0,
+    #                 "overtime_minutes": 0.0,
+    #                 "miles_delta": miles,
+    #                 "cost": cost,
+    #             })
+    #     return total, all_assigns
