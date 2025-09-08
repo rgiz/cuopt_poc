@@ -9,9 +9,16 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-
 @pytest.fixture(autouse=True)
 def _env_test_data(monkeypatch, tmp_path: Path):
+    """
+    Prepare dummy test data unless TEST_DATASET=real.
+    """
+    if os.getenv("TEST_DATASET", "toy").lower() == "real":
+        # Real data should be picked up by load_private_data() in app
+        yield
+        return
+
     """
     Prepare a tiny dataset under a temp DATA_ROOT so tests can use
     abstract locations 'A','B','C' without relying on the real bundle.
@@ -135,7 +142,14 @@ def app(_env_test_data):
 @pytest.fixture
 def client(app):
     c = TestClient(app)
-    # Force in-process reload to pick up toy files
+
     r = c.post("/admin/reload")
-    assert r.status_code in (200, 204), f"/admin/reload failed: {r.status_code} {r.text}"
+
+    if os.getenv("TEST_DATASET", "toy").lower() == "real":
+        # In real mode, if data isn't present, fail loudly
+        assert r.status_code == 200, f"[real mode] /admin/reload failed: {r.status_code} {r.text}"
+    else:
+        # In dummy mode, reload may return 204 (no driver states etc.)
+        assert r.status_code in (200, 204), f"[toy mode] /admin/reload failed: {r.status_code} {r.text}"
+
     return c

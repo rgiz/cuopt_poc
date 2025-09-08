@@ -1,5 +1,13 @@
 import json
 
+import os
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("TEST_DATASET", "toy").lower() == "real",
+    reason="Only runs in toy dataset mode"
+)
+
 def test_priority_map_loaded(client):
     r = client.get("/plan/priority_map")
     assert r.status_code == 200
