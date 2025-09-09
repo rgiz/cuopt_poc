@@ -44,3 +44,21 @@ test-docker:
 # Clean test artifacts
 clean-test:
 	rm -rf htmlcov/ .coverage pytest-results.xml .pytest_cache/
+
+# cuOpt integration tests (requires cuOpt server)
+test-cuopt:
+	@echo "Starting cuOpt integration tests..."
+	@if [ -z "$$TEST_CUOPT_URL" ]; then \
+		echo "Starting local cuOpt server..."; \
+		docker-compose up -d cuopt; \
+		sleep 10; \
+		export TEST_CUOPT_URL=http://localhost:5000; \
+	fi
+	TEST_CUOPT_URL=$${TEST_CUOPT_URL:-http://localhost:5000} \
+	pytest tests/integration/test_cuopt_integration.py -v -m cuopt
+
+# Full integration test including cuOpt
+test-integration-full:
+	docker-compose up -d cuopt
+	sleep 15
+	TEST_CUOPT_URL=http://localhost:5000 pytest tests/integration/ -v

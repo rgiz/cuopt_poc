@@ -9,27 +9,34 @@ class TestCostCalculations:
 
     def test_outsourcing_cost_calculation(self, client):
         """Test outsourcing cost calculation when no candidates available"""
+        
+        # Create conditions that force outsourcing:
+        # 1. Use locations that might not have drivers nearby
+        # 2. Use very early time when drivers aren't available
+        # 3. Use low priority that won't displace existing trips
         payload = {
-            "start_location": "A", "end_location": "C",  # Long trip
-            "when_local": "2025-09-02T03:00",  # Very early, likely no candidates
-            "priority": 5,  # Low priority
-            "mode": "depart_after"
+            "start_location": "A", "end_location": "C",  # Different from driver routes
+            "when_local": "2025-09-02T02:00",  # Very early morning
+            "priority": 5,  # Lowest priority
+            "mode": "depart_after",
+            "max_cascades": 1,           # Add required fields
+            "max_drivers_affected": 1    # Add required fields
         }
         
         # Get cost config first
         config_resp = client.get("/config")
         cost_config = config_resp.json()["cost_config"]
         
-        r = client.post("/plan/solve_multi", json=payload)
+        r = client.post("/plan/solve_cascades", json=payload)  # Changed endpoint
         assert r.status_code == 200
         
         result = r.json()
-        if "solutions" in result and result["solutions"]:
-            assignment = result["solutions"][0]["assignments"][0]
-        elif "assignments" in result and result["assignments"]:
-            assignment = result["assignments"][0]
-        else:
-            raise AssertionError(f"No assignments found in result: {result}")
+        
+        # solve_cascades returns assignments directly
+        assignments = result.get("assignments", [])
+        assert len(assignments) > 0, f"No assignments found in result: {result}"
+        
+        assignment = assignments[0]  # Get first assignment
         
         if assignment["type"] == "outsourced":
             # Verify outsourcing cost calculation
@@ -46,6 +53,11 @@ class TestCostCalculations:
             assert "outsourcing_miles" in breakdown
             assert abs(breakdown["outsourcing_base"] - base_cost) < 0.01
             assert abs(breakdown["outsourcing_miles"] - (per_mile_cost * trip_miles)) < 0.01
+        else:
+            # If not outsourced, ensure it's a valid reassignment with positive cost
+            assert assignment["type"] == "reassigned"
+            assert assignment["cost"] > 0
+            print(f"Test resulted in reassignment instead of outsourcing: {assignment['candidate_id']}")
 
     def test_sla_penalty_cost_calculation(self, client):
         """Test SLA penalty calculations for late deliveries"""

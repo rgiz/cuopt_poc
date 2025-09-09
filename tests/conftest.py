@@ -162,19 +162,39 @@ def test_mode():
     """Determine test mode from environment"""
     return os.getenv("TEST_MODE", "unit").lower()
 
-@pytest.fixture(scope="session") 
-def cuopt_server():
-    """Provide cuOpt server URL if available"""
+@pytest.fixture(scope="session")
+def cuopt_server_url():
+    """Fixture to provide cuOpt server URL for integration tests"""
+    import os
+    import requests
+    import time
+    
+    # Try environment variable first
     url = os.getenv("TEST_CUOPT_URL")
+    if not url:
+        # Default to local Docker cuOpt
+        url = "http://localhost:5000"
+    
     if url:
-        # Verify server is responsive
-        import requests
-        try:
-            resp = requests.get(f"{url}/health", timeout=5)
-            if resp.status_code == 200:
-                return url
-        except:
-            pass
+        # Verify server is responsive with retries
+        for attempt in range(30):  # 30 second timeout
+            try:
+                resp = requests.get(f"{url}/health", timeout=2)
+                if resp.status_code == 200:
+                    return url
+            except:
+                pass
+            
+            # Also try root endpoint
+            try:
+                resp = requests.get(url, timeout=2)
+                if resp.status_code in [200, 404]:  # 404 is OK, means server is up
+                    return url
+            except:
+                pass
+                
+            time.sleep(1)
+    
     return None
 
 @pytest.fixture(scope="session")

@@ -46,7 +46,7 @@ from src.plan.router import create_router as create_plan_router
 DEBUG_API = os.getenv("DEBUG_API", "1") == "1"
 BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data")).resolve()
 DATASET_DIR = BASE_DIR / "active" if (BASE_DIR / "active").exists() else BASE_DIR
-CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000")
+CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000").rstrip("/v2").rstrip("/")
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*")
 ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS.split(",") if o.strip()] or ["*"]
 
@@ -80,12 +80,25 @@ def admin_router() -> APIRouter:
                 server_url=CUOPT_URL,
                 max_solve_time_seconds=10,
             )
-            ping = requests.get(urljoin(CUOPT_URL.rstrip('/') + '/', '')).json()
+            
             step = "submit"
-            req_id = model._submit_request({"ping": "ok"})
-            step = "poll"
-            res = model._poll_result(req_id)
-            return {"ok": True, "step": step, "ping": ping, "req_id": req_id, "result_keys": list(res.keys())}
+            # Test with proper payload format
+            test_payload = {
+                "fleet_data": {"vehicles": []},
+                "task_data": {"tasks": []},
+                "solver_config": {"time_limit": 5}
+            }
+            
+            # Try direct synchronous call instead of async
+            if model._solve_path == "cuopt/request":
+                # This endpoint returns results immediately, not a request ID
+                step = "sync_call"
+                result = model._post_json("cuopt/request", test_payload)
+                return {"ok": True, "step": "complete", "result_keys": list(result.keys())}
+            else:
+                step = "unknown_path"
+                return {"ok": False, "step": step, "error": f"Unexpected solve path: {model._solve_path}"}
+                
         except Exception as e:
             return {"ok": False, "step": step, "error": str(e)}
 
