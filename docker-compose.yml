@@ -1,13 +1,24 @@
 services:
   cuopt:
-    image: ${CUOPT_IMAGE}
-    container_name: cuopt
-    gpus: all
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
+    image: nvidia/cuopt:25.10.0a-cuda12.9-py3.12
     ports:
       - "5000:5000"
-    restart: unless-stopped
+    environment:
+      - CUOPT_SERVER_PORT=5000
+      - CUOPT_SERVER_LOG_LEVEL=info
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/cuopt/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   api:
     build:

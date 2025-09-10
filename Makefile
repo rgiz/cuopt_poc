@@ -17,14 +17,6 @@ test-integration:
 test-performance:
 	pytest tests/performance/ -v -m performance
 
-# cuOpt integration tests (requires cuOpt server)
-test-cuopt:
-	@if [ -z "$$TEST_CUOPT_URL" ]; then \
-		echo "Error: TEST_CUOPT_URL environment variable required"; \
-		exit 1; \
-	fi
-	pytest tests/integration/test_cuopt_integration.py -v -m cuopt
-
 # All tests with real data
 test-real:
 	@if [ ! -d "$$PRIVATE_DATA_DIR" ]; then \
