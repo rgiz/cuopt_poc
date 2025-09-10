@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""
+Comprehensive cuOpt diagnostic test
+Tests multiple payload formats and diagnoses container issues
+"""
+
+import pytest
+import json
+import time
+import requests
+import subprocess
+
+# Copy the debug solve function here
+
+def solve_with_cuopt_debug(raw_base_url, payload, timeout_sec=None):
+"""Debug version with logging - same as before"""
+import os
+
+    timeout = float(timeout_sec or 120)
+    base = raw_base_url.rstrip("/")
+
+    print(f"🔍 DEBUG: Submitting to {base}/cuopt/request")
+    print(f"🔍 DEBUG: Payload: {json.dumps(payload, indent=2)}")
+
+    headers = {'Content-Type': 'application/json', 'CLIENT-VERSION': 'custom'}
+
+    # Submit request
+    response = requests.post(f"{base}/cuopt/request", json=payload, headers=headers, timeout=30)
+    response.raise_for_status()
+    initial = response.json()
+    print(f"🔍 DEBUG: Got request ID: {initial.get('reqId')}")
+
+    if 'response' in initial:
+        return initial['response']
+
+    # Poll for results
+    request_id = initial['reqId']
+    poll_url = f"{base}/cuopt/requests/{request_id}"
+    start_time = time.time()
+    poll_count = 0
+
+    while time.time() - start_time < timeout:
+        poll_count += 1
+        elapsed = time.time() - start_time
+
+        if poll_count % 5 == 0:  # Log every 5th poll
+            print(f"🔄 Still polling... attempt #{poll_count} (elapsed: {elapsed:.1f}s)")
+
+        poll_response = requests.get(poll_url, headers={'Content-Type': 'application/json'}, timeout=10)
+
+        if poll_response.status_code == 200:
+            result = poll_response.json()
+            if 'response' in result and 'solver_response' in result['response']:
+                print(f"✅ Got result after {elapsed:.1f}s ({poll_count} polls)")
+                return result['response']
+
+        elif poll_response.status_code != 404:
+            print(f"⚠️ Unexpected poll status: {poll_response.status_code}")
+            print(f"Response: {poll_response.text}")
+
+        time.sleep(2)
+
+    raise TimeoutError(f"Request {request_id} timed out after {timeout}s")
+
+def check_cuopt_container():
+"""Diagnose cuOpt container issues"""
+print("\n" + "="*50)
+print("CUOPT CONTAINER DIAGNOSTICS")
+print("="*50)
+
+    try:
+        # Check running containers
+        result = subprocess.run(["docker", "ps", "--filter", "name=cuopt"],
+                              capture_output=True, text=True)
+        print("Running cuOpt containers:")
+        print(result.stdout)
+
+        if "cuopt" not in result.stdout:
+            print("❌ No cuOpt containers running!")
+            return False
+
+        # Get container name
+        lines = result.stdout.strip().split('\n')
+        if len(lines) < 2:
+            print("❌ Could not find cuOpt container")
+            return False
+
+        container_line = lines[1]  # Skip header
+        container_name = container_line.split()[-1]  # Last column is name
+        print(f"✅ Found container: {container_name}")
+
+        # Check logs for errors
+        print(f"\n--- Container logs (last 10 lines) ---")
+        logs = subprocess.run(["docker", "logs", "--tail", "10", container_name],
+                            capture_output=True, text=True)
+        print(logs.stdout)
+        if logs.stderr:
+            print(f"STDERR: {logs.stderr}")
+
+        # Check GPU access
+        print(f"\n--- Checking GPU access ---")
+        gpu_check = subprocess.run(["docker", "exec", container_name, "nvidia-smi"],
+                                 capture_output=True, text=True)
+        if gpu_check.returncode == 0:
+            print("✅ GPU access OK")
+            print(gpu_check.stdout.split('\n')[0])  # First line with GPU info
+        else:
+            print("❌ NO GPU ACCESS!")
+            print(f"Error: {gpu_check.stderr}")
+            print("This could be why cuOpt jobs never complete")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ Container diagnostics failed: {e}")
+        return False
+
+def test_payload_variations():
+"""Test different payload formats to find what works"""
+
+    # Format 1: Exact Azure Maps example (known working)
+    azure_payload = {
+        "cost_matrix_data": {"data": {"0": [[0, 5, 4], [5, 0, 6], [4, 6, 0]]}},
+        "fleet_data": {
+            "vehicle_locations": [[0, 0]],
+            "vehicle_ids": ["Car-A"],
+            "vehicle_types": [1],
+            "capacities": [[75]],
+            "vehicle_time_windows": [[8, 18]],
+            "vehicle_break_time_windows": [[[12, 14]]],
+            "vehicle_break_durations": [[1]]
+        },
+        "task_data": {
+            "task_locations": [1, 2],
+            "demand": [[30, 40]],
+            "task_time_windows": [[8, 17], [8, 17]],
+            "service_times": [5, 5]
+        },
+        "solver_config": {"time_limit": 5}
+    }
+
+    # Format 2: Minimal but complete
+    minimal_payload = {
+        "cost_matrix_data": {"data": {"0": [[0, 10], [10, 0]]}},
+        "fleet_data": {
+            "vehicle_locations": [[0, 0]],
+            "vehicle_types": [1],
+            "capacities": [[50]]
+        },
+        "task_data": {
+            "task_locations": [1],
+            "demand": [[10]]
+        },
+        "solver_config": {"time_limit": 3}
+    }
+
+    # Format 3: Original failing format (for comparison)
+    original_payload = {
+        "cost_matrix_data": {"data": {"0": [[0, 50], [50, 0]]}},
+        "fleet_data": {
+            "vehicle_locations": [[0, 0]],
+            "capacities": [[100]]
+        },
+        "task_data": {
+            "task_locations": [1],
+            "demand": [[10]],
+            "service_times": [5]
+        },
+        "solver_config": {"time_limit": 5}
+    }
+
+    return [
+        ("Azure Maps Format", azure_payload),
+        ("Minimal Complete", minimal_payload),
+        ("Original Format", original_payload)
+    ]
+
+@pytest.mark.cuopt
+@pytest.mark.integration
+def test_cuopt_comprehensive_diagnosis(cuopt_server_url):
+"""Comprehensive cuOpt diagnostic test"""
+
+    if not cuopt_server_url:
+        pytest.skip("No cuOpt server available")
+
+    print(f"\n" + "="*60)
+    print("COMPREHENSIVE CUOPT DIAGNOSIS")
+    print("="*60)
+    print(f"cuOpt URL: {cuopt_server_url}")
+
+    # Step 1: Check container health
+    container_ok = check_cuopt_container()
+
+    # Step 2: Test different payload formats
+    print(f"\n" + "="*50)
+    print("TESTING DIFFERENT PAYLOAD FORMATS")
+    print("="*50)
+
+    payload_tests = test_payload_variations()
+    results = []
+
+    for name, payload in payload_tests:
+        print(f"\n--- Testing: {name} ---")
+        try:
+            result = solve_with_cuopt_debug(cuopt_server_url, payload, timeout_sec=15)
+            print(f"✅ {name} WORKED!")
+
+            # Analyze result
+            if 'solver_response' in result:
+                status = result['solver_response'].get('status')
+                cost = result['solver_response'].get('solution_cost', 0)
+                print(f"   Status: {status}, Cost: {cost}")
+
+            results.append((name, True, result))
+            break  # Found a working format!
+
+        except Exception as e:
+            print(f"❌ {name} failed: {e}")
+            results.append((name, False, str(e)))
+
+    # Step 3: Summary and recommendations
+    print(f"\n" + "="*50)
+    print("DIAGNOSIS SUMMARY")
+    print("="*50)
+
+    working_formats = [r for r in results if r[1]]
+
+    if working_formats:
+        print(f"✅ SUCCESS: {working_formats[0][0]} format works!")
+        print(f"   Solution: Use this payload format in your application")
+    else:
+        print("❌ NO FORMATS WORKED")
+        if not container_ok:
+            print("   Likely issue: cuOpt container problems (check GPU access)")
+        else:
+            print("   Likely issue: Payload format still not correct for cuOpt 25.10.0a")
+
+    # Always show what we learned
+    print(f"\n📋 Results:")
+    for name, success, details in results:
+        status = "✅ PASS" if success else "❌ FAIL"
+        print(f"   {status} {name}")
+
+    # If no format worked, fail the test but with useful info
+    if not working_formats:
+        pytest.fail(f"No payload format worked. Container OK: {container_ok}")
+
+    return working_formats[0][2]  # Return the working result
+
+if **name** == "**main**": # Can be run standalone for debugging
+test_cuopt_comprehensive_diagnosis("http://localhost:5000")

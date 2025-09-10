@@ -1,6 +1,6 @@
 import time
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 class CuOptSolution:
     def __init__(self, objective_value: float, assignments: List[Dict[str, Any]], details: Dict[str, Any]):
