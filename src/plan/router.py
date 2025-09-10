@@ -7,7 +7,8 @@ from .models import (
     PlanSolveCascadeRequest, PlanSolveCascadeResponse, AssignmentOut,
     PlanSolveMultiRequest, PlanSolveMultiResponse, PlanSolutionOut, DriverScheduleOut
 )
-from .cuopt_adapter import build_cuopt_payload, solve_with_cuopt, extract_solutions_from_cuopt
+# from .cuopt_adapter import build_cuopt_payload, solve_with_cuopt, extract_solutions_from_cuopt
+from .cuopt_adapter import solve_with_cuopt
 from .config import load_priority_map, load_sla_windows
 from .candidates import generate_candidates, weekday_from_local
 from .geo import build_loc_meta_from_locations_csv
@@ -82,75 +83,90 @@ def create_router(
         cascades: List[Dict[str, Any]],
     ) -> List[DriverScheduleOut]:
         """
-        Build per-driver schedules before/after:
-        - 'before' is taken directly from DATA['driver_states'][driver]['elements']
-        - We remove displaced legs (as indicated by cascades) from the original driver's 'after'
-        - We add new/reassigned legs (those with trip_id starting with NEW:/CASCADE:) into the assigned driver's 'after'
-        NOTE: This is still best-effort until cuOpt exact times are wired in.
+        FIXED: Build per-driver schedules ONLY for affected drivers to prevent infinite loops.
         """
         ds = DATA.get("driver_states", {})
         drivers = ds.get("drivers", ds) if isinstance(ds, dict) else {}
 
-        # Prepare 'before' and shallow-copy 'after'
+        # CRITICAL FIX: Only process drivers that are actually affected
+        affected_driver_ids = set()
+        
+        # Add drivers from assignments
+        for a in assignments:
+            if a.driver_id:
+                affected_driver_ids.add(a.driver_id)
+        
+        # Add drivers from cascades
+        for c in cascades:
+            if c.get("driver_id"):
+                affected_driver_ids.add(c["driver_id"])
+        
+        # SAFETY: Limit to max 10 drivers to prevent UI overload
+        if len(affected_driver_ids) > 10:
+            affected_driver_ids = set(list(affected_driver_ids)[:10])
+        
         schedule_map: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        for drv_id, meta in drivers.items():
+        
+        # ONLY process affected drivers
+        for drv_id in affected_driver_ids:
+            if drv_id not in drivers:
+                continue
+                
+            meta = drivers[drv_id]
             before = list(meta.get("elements", []))
-            after = [dict(e) for e in before]
+            after = [dict(e) for e in before]  # Shallow copy
             schedule_map[drv_id] = {"before": before, "after": after}
 
-        # Collect displaced legs from cascades (from/to pairs)
+        # Process displacements (remove displaced legs)
         displaced = []
         for c in cascades:
-            # c has: driver_id, from, to, priority, displaced_by, depth
             d = c.get("driver_id")
             fr = str(c.get("from", "")).upper()
             to = str(c.get("to", "")).upper()
-            if d and fr and to:
+            if d and fr and to and d in schedule_map:
                 displaced.append((d, fr, to))
 
-        # Remove first matching travel leg from original driver's AFTER
+        # Remove displaced legs from after schedules
         for (drv_id, fr, to) in displaced:
-            m = schedule_map.get(drv_id)
-            if not m:
+            if drv_id not in schedule_map:
                 continue
-            after = m["after"]
+            after = schedule_map[drv_id]["after"]
             for idx, e in enumerate(after):
-                if e.get("is_travel") and str(e.get("from","")).upper() == fr and str(e.get("to","")).upper() == to:
+                if (e.get("is_travel") and 
+                    str(e.get("from","")).upper() == fr and 
+                    str(e.get("to","")).upper() == to):
                     del after[idx]
                     break
 
-        # Add new assigned legs to target driver's AFTER
-        def _leg_from_trip_id(trip_id: str) -> Dict[str, Any]:
-            # e.g. NEW:A->B@1693650600 or CASCADE:A->B@12345 (we only trust from/to)
-            leg: Dict[str, Any] = {"is_travel": True, "from": "", "to": "", "note": trip_id}
-            core = trip_id.split("@", 1)[0]
-            if ":" in core:
-                core = core.split(":", 1)[1]
-            if "->" in core:
-                fr, to = core.split("->", 1)
-                leg["from"] = str(fr).upper()
-                leg["to"] = str(to).upper()
-            return leg
-
+        # Add new assigned legs (simplified)
         for a in assignments:
-            # Only add concrete legs (the NEW/CASCADE trips we actually placed)
-            if a.type in ("reassigned", "outsourced"):
+            if a.type == "reassigned" and a.driver_id and a.driver_id in schedule_map:
                 if isinstance(a.trip_id, str) and (a.trip_id.startswith("NEW:") or a.trip_id.startswith("CASCADE:")):
-                    leg = _leg_from_trip_id(a.trip_id)
-                    # Attach simple metrics if available
-                    if a.delay_minutes is not None:
-                        leg["delay_min"] = a.delay_minutes
-                    if a.miles_delta is not None:
-                        leg["miles"] = a.miles_delta
-                    # Place on assigned driver if reassigned, otherwise mark as outsourced (no driver)
-                    if a.type == "reassigned" and a.driver_id:
-                        m = schedule_map.setdefault(a.driver_id, {"before": [], "after": []})
-                        m["after"].append(leg)
+                    # Extract route info from trip_id
+                    core = a.trip_id.split("@", 1)[0]
+                    if ":" in core:
+                        core = core.split(":", 1)[1]
+                    if "->" in core:
+                        fr, to = core.split("->", 1)
+                        leg = {
+                            "is_travel": True,
+                            "from": str(fr).upper(),
+                            "to": str(to).upper(),
+                            "note": f"Added: {a.trip_id}",
+                            "delay_min": a.delay_minutes or 0,
+                            "miles": a.miles_delta or 0
+                        }
+                        schedule_map[a.driver_id]["after"].append(leg)
 
-        # Render as DriverScheduleOut list
+        # Return only affected driver schedules
         out: List[DriverScheduleOut] = []
         for drv_id, m in schedule_map.items():
-            out.append(DriverScheduleOut(driver_id=drv_id, before=m["before"], after=m["after"]))
+            out.append(DriverScheduleOut(
+                driver_id=drv_id, 
+                before=m["before"][:20],  # SAFETY: Limit elements shown
+                after=m["after"][:20]     # SAFETY: Limit elements shown
+            ))
+        
         return out
 
     def _bounds_from_when_local(when_local: str, minutes: float | None, mode: str, sla_windows: Dict[int, Dict[str, int]]) -> tuple[int, int]:
