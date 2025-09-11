@@ -75,7 +75,7 @@ with col5:
 
 # Advanced options (collapsible)
 with st.expander("Advanced Options"):
-    topn = st.slider("Max candidates to show", 5, 50, 20, key="topn")
+    topn = st.slider("Max candidates to show", 3, 20, 10, key="topn")
 
 # --- SECTION 2: FIND CANDIDATES ---
 st.header("2. Find Candidates")
@@ -299,9 +299,9 @@ if st.session_state.selected_candidate:
                                     
                                     if display_cols:
                                         display_df = after_df[display_cols].rename(columns=col_mapping)
-                                        st.dataframe(display_df.head(10), use_container_width=True)
+                                        st.dataframe(display_df, use_container_width=True)
                                     else:
-                                        st.dataframe(after_df.head(10), use_container_width=True)
+                                        st.dataframe(after_df, use_container_width=True)
                                 else:
                                     st.write("No scheduled activities")
                 else:

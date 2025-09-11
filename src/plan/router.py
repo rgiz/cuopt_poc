@@ -1,6 +1,9 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Tuple, Optional, Callable
 from fastapi import APIRouter, HTTPException, Request
+import sys
+import traceback
+import re
 
 from .models import (
     PlanRequest, PlanCandidatesResponse, CandidateOut,
@@ -11,7 +14,7 @@ from .models import (
 from .cuopt_adapter import solve_with_cuopt
 from .config import load_priority_map, load_sla_windows
 from .candidates import generate_candidates, weekday_from_local
-from .geo import build_loc_meta_from_locations_csv
+from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates
 
 
 def create_router(
@@ -76,180 +79,7 @@ def create_router(
             "duration_minutes": dur,
             "trip_miles": miles,
         }
-
-    def _compute_before_after_schedules(
-        DATA: Dict[str, Any],
-        assignments: List[AssignmentOut],
-        cascades: List[Dict[str, Any]],
-    ) -> List[DriverScheduleOut]:
-        """
-        FIXED: Build per-driver schedules showing the new assignments properly.
-        """
-        ds = DATA.get("driver_states", {})
-        drivers = ds.get("drivers", ds) if isinstance(ds, dict) else {}
-
-        # Get affected drivers from assignments and cascades
-        affected_driver_ids = set()
-        for a in assignments:
-            if a.driver_id:
-                affected_driver_ids.add(a.driver_id)
-        for c in cascades:
-            if c.get("driver_id"):
-                affected_driver_ids.add(c["driver_id"])
-        
-        # Safety limit
-        if len(affected_driver_ids) > 10:
-            affected_driver_ids = set(list(affected_driver_ids)[:10])
-        
-        schedule_map: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-        
-        # Process only affected drivers
-        for drv_id in affected_driver_ids:
-            if drv_id not in drivers:
-                continue
-                
-            meta = drivers[drv_id]
-            before = list(meta.get("elements", []))
-            after = [dict(e) for e in before]  # Shallow copy
-            schedule_map[drv_id] = {"before": before, "after": after}
-
-        # Remove displaced legs from after schedules (cascades)
-        displaced_legs = []
-        for c in cascades:
-            d = c.get("driver_id")
-            fr = str(c.get("from", "")).upper()
-            to = str(c.get("to", "")).upper()
-            if d and fr and to and d in schedule_map:
-                displaced_legs.append((d, fr, to))
-
-        for (drv_id, fr, to) in displaced_legs:
-            if drv_id not in schedule_map:
-                continue
-            after = schedule_map[drv_id]["after"]
-            for idx in range(len(after) - 1, -1, -1):  # Reverse iteration for safe removal
-                e = after[idx]
-                if (e.get("is_travel") and 
-                    str(e.get("from", "")).upper() == fr and 
-                    str(e.get("to", "")).upper() == to):
-                    del after[idx]
-                    break
-
-        for a in assignments:
-            if a.type == "reassigned" and a.driver_id and a.driver_id in schedule_map:
-                # Parse the new route from trip_id
-                trip_id = a.trip_id
-                
-                # Extract start and end locations from various trip_id formats
-                from_loc = None
-                to_loc = None
-                
-                if ":" in trip_id and "->" in trip_id:
-                    # Format: "NEW:AMAZON (STN8) MK17 7AB->Midlands Super Hub@2025-09-02T10:30"
-                    route_part = trip_id.split(":", 1)[1].split("@")[0]
-                    if "->" in route_part:
-                        parts = route_part.split("->")
-                        from_loc = parts[0].strip()
-                        to_loc = parts[1].strip()
-                        
-                        # Clean up location names (remove postcodes/codes in parentheses)
-                        import re
-                        from_loc = re.sub(r'\s*\([^)]*\)\s*', '', from_loc).strip()
-                        to_loc = re.sub(r'\s*\([^)]*\)\s*', '', to_loc).strip()
-                
-                # If we successfully parsed the route, add it to the schedule
-                if from_loc and to_loc:
-                    candidate_id = a.candidate_id or ""
-                    
-                    # Determine insertion strategy based on candidate type
-                    if "slack@" in candidate_id:
-                        # Replace AS DIRECTED time with new assignment
-                        after_schedule = schedule_map[a.driver_id]["after"]
-                        
-                        # Find and replace AS DIRECTED element
-                        for idx, element in enumerate(after_schedule):
-                            element_type = str(element.get("element_type", "")).upper()
-                            if "AS DIRECTED" in element_type:
-                                # Replace the AS DIRECTED element with new assignment
-                                new_element = {
-                                    "element_type": "TRAVEL",
-                                    "is_travel": True,
-                                    "from": from_loc,
-                                    "to": to_loc,
-                                    "start_min": element.get("start_min"),
-                                    "end_min": element.get("end_min"),
-                                    "priority": 1,  # High priority new assignment
-                                    "note": f"NEW: {from_loc} → {to_loc}",
-                                    "planz_code": "NEW_ASSIGNMENT",
-                                    "load_type": "URGENT_DELIVERY"
-                                }
-                                after_schedule[idx] = new_element
-                                break
-                    
-                    elif "append" in candidate_id:
-                        # Add to end of schedule
-                        new_element = {
-                            "element_type": "TRAVEL",
-                            "is_travel": True,
-                            "from": from_loc,
-                            "to": to_loc,
-                            "start_min": None,  # Will be calculated
-                            "end_min": None,
-                            "priority": 1,
-                            "note": f"APPENDED: {from_loc} → {to_loc}",
-                            "planz_code": "NEW_ASSIGNMENT",
-                            "load_type": "URGENT_DELIVERY"
-                        }
-                        schedule_map[a.driver_id]["after"].append(new_element)
-                    
-                    elif "swap_leg@" in candidate_id or "take_empty@" in candidate_id:
-                        # Insert or replace existing leg
-                        new_element = {
-                            "element_type": "TRAVEL", 
-                            "is_travel": True,
-                            "from": from_loc,
-                            "to": to_loc,
-                            "start_min": None,
-                            "end_min": None,
-                            "priority": 1,
-                            "note": f"SWAPPED: {from_loc} → {to_loc}",
-                            "planz_code": "NEW_ASSIGNMENT",
-                            "load_type": "URGENT_DELIVERY"
-                        }
-                        schedule_map[a.driver_id]["after"].append(new_element)
-                    
-                    else:
-                        # Default: append to end
-                        new_element = {
-                            "element_type": "TRAVEL",
-                            "is_travel": True,
-                            "from": from_loc,
-                            "to": to_loc,
-                            "start_min": None,
-                            "end_min": None,
-                            "priority": 1,
-                            "note": f"ADDED: {from_loc} → {to_loc}",
-                            "planz_code": "NEW_ASSIGNMENT", 
-                            "load_type": "URGENT_DELIVERY"
-                        }
-                        schedule_map[a.driver_id]["after"].append(new_element)
-
-
-
-
-
-
-        
-        # Return driver schedules
-        out: List[DriverScheduleOut] = []
-        for drv_id, m in schedule_map.items():
-            out.append(DriverScheduleOut(
-                driver_id=drv_id, 
-                before=m["before"][:20],  # Limit elements shown
-                after=m["after"][:20]     # Limit elements shown
-            ))
-        
-        return out
-    
+   
     def _bounds_from_when_local(when_local: str, minutes: float | None, mode: str, sla_windows: Dict[int, Dict[str, int]]) -> tuple[int, int]:
         """
         Convert ISO local like '2025-09-02T10:30' into [earliest, latest] minute bounds
@@ -285,6 +115,827 @@ def create_router(
 
         return int(earliest), int(latest)
 
+    def analyze_duty_insertion_point(
+        assignment: AssignmentOut, 
+        driver_elements: List[Dict[str, Any]], 
+        M: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Analyze where and how a new assignment should be inserted into a driver's duty.
+        Returns insertion strategy and metadata for duty reconstruction.
+        """
+        candidate_id = assignment.candidate_id or ""
+        trip_id = assignment.trip_id or ""
+        
+        # Parse the new route from trip_id
+        route_info = parse_route_from_trip_id(trip_id)
+        if not route_info:
+            return {"strategy": "unknown", "error": "Could not parse route from trip_id"}
+        
+        from_loc, to_loc = route_info
+        
+        # Determine insertion strategy based on candidate_id pattern
+        if "take_empty@" in candidate_id:
+            return analyze_empty_replacement(candidate_id, driver_elements, from_loc, to_loc)
+        
+        elif "slack@" in candidate_id:
+            return analyze_slack_replacement(candidate_id, driver_elements, from_loc, to_loc, M)
+        
+        elif "swap_leg@" in candidate_id:
+            return analyze_leg_swap(candidate_id, driver_elements, from_loc, to_loc)
+        
+        elif "append" in candidate_id:
+            return analyze_duty_append(driver_elements, from_loc, to_loc, M)
+        
+        else:
+            return {"strategy": "unknown", "error": f"Unknown candidate pattern: {candidate_id}"}
+
+    def parse_route_from_trip_id(trip_id: str) -> Optional[Tuple[str, str]]:
+        """Extract start and end locations from trip_id"""
+        if ":" in trip_id and "->" in trip_id:
+            try:
+                # Format: "NEW:AMAZON (STN8) MK17 7AB->Midlands Super Hub@2025-09-02T10:30"
+                route_part = trip_id.split(":", 1)[1].split("@")[0]
+                if "->" in route_part:
+                    parts = route_part.split("->", 1)
+                    from_loc = parts[0].strip()
+                    to_loc = parts[1].strip()
+                    
+                    # Clean up location names (remove postcodes/codes in parentheses)
+                    from_loc = re.sub(r'\s*\([^)]*\)\s*', '', from_loc).strip()
+                    to_loc = re.sub(r'\s*\([^)]*\)\s*', '', to_loc).strip()
+                    
+                    return (from_loc, to_loc)
+            except Exception:
+                pass
+        return None
+
+    def analyze_empty_replacement(
+        candidate_id: str, 
+        driver_elements: List[Dict[str, Any]], 
+        from_loc: str, 
+        to_loc: str
+    ) -> Dict[str, Any]:
+        """Analyze replacement of an empty leg with loaded assignment"""
+        
+        # Extract timing from candidate_id: "take_empty@540" means start at minute 540
+        try:
+            start_time = int(candidate_id.split("@")[1])
+        except:
+            return {"strategy": "error", "error": "Could not parse start time from candidate_id"}
+        
+        # Find the empty leg that matches this timing and route
+        target_element = None
+        target_index = None
+        
+        for i, element in enumerate(driver_elements):
+            if (element.get("is_travel") and 
+                element.get("start_min") == start_time and
+                element.get("from", "").upper() == from_loc.upper() and
+                element.get("to", "").upper() == to_loc.upper()):
+                target_element = element
+                target_index = i
+                break
+        
+        if target_element is None:
+            return {"strategy": "error", "error": f"Could not find empty leg at time {start_time}"}
+        
+        return {
+            "strategy": "empty_replacement",
+            "insertion_index": target_index,
+            "target_element": target_element,
+            "new_route": (from_loc, to_loc),
+            "simple_swap": True,  # Just change load status
+            "description": f"Replace empty leg {from_loc} -> {to_loc} with loaded assignment"
+        }
+
+    def analyze_slack_replacement(
+        candidate_id: str, 
+        driver_elements: List[Dict[str, Any]], 
+        from_loc: str, 
+        to_loc: str,
+        M: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze replacement of AS DIRECTED time with positioned pickup + delivery"""
+        
+        # Extract location from candidate_id: "slack@17" means using slack at location index 17
+        try:
+            slack_location_id = int(candidate_id.split("@")[1])
+        except:
+            return {"strategy": "error", "error": "Could not parse location from slack candidate_id"}
+        
+        # Find the AS DIRECTED element
+        slack_element = None
+        slack_index = None
+        
+        for i, element in enumerate(driver_elements):
+            element_type = str(element.get("element_type", "")).upper()
+            if "AS DIRECTED" in element_type:
+                slack_element = element
+                slack_index = i
+                break
+        
+        if slack_element is None:
+            return {"strategy": "error", "error": "Could not find AS DIRECTED element"}
+        
+        # Get slack location name
+        slack_location = get_location_name_by_id(slack_location_id, M)
+        if not slack_location:
+            return {"strategy": "error", "error": f"Could not resolve location ID {slack_location_id}"}
+        
+        return {
+            "strategy": "slack_replacement",
+            "insertion_index": slack_index,
+            "slack_element": slack_element,
+            "slack_location": slack_location,
+            "new_route": (from_loc, to_loc),
+            "positioning_required": True,
+            "sequence": [
+                {"type": "positioning", "from": slack_location, "to": from_loc, "load": "EMPTY"},
+                {"type": "assignment", "from": from_loc, "to": to_loc, "load": "LOADED"},
+                {"type": "return", "from": to_loc, "to": "TBD", "load": "EMPTY"}  # TBD = to be determined
+            ],
+            "description": f"Replace AS DIRECTED time with: {slack_location} -> {from_loc} (empty) -> {to_loc} (loaded) -> return"
+        }
+
+    def analyze_leg_swap(
+        candidate_id: str, 
+        driver_elements: List[Dict[str, Any]], 
+        from_loc: str, 
+        to_loc: str
+    ) -> Dict[str, Any]:
+        """Analyze swapping an existing leg with new assignment"""
+        
+        # Extract timing from candidate_id: "swap_leg@600" 
+        try:
+            start_time = int(candidate_id.split("@")[1])
+        except:
+            return {"strategy": "error", "error": "Could not parse start time from swap candidate_id"}
+        
+        # Find the leg being swapped
+        target_element = None
+        target_index = None
+        
+        for i, element in enumerate(driver_elements):
+            if (element.get("is_travel") and 
+                element.get("start_min") == start_time):
+                target_element = element
+                target_index = i
+                break
+        
+        if target_element is None:
+            return {"strategy": "error", "error": f"Could not find leg to swap at time {start_time}"}
+        
+        original_route = (target_element.get("from", ""), target_element.get("to", ""))
+        
+        return {
+            "strategy": "leg_swap",
+            "insertion_index": target_index,
+            "target_element": target_element,
+            "original_route": original_route,
+            "new_route": (from_loc, to_loc),
+            "displacement_required": True,  # The original leg needs to be reassigned
+            "description": f"Swap {original_route[0]} -> {original_route[1]} with {from_loc} -> {to_loc}"
+        }
+
+    def analyze_duty_append(
+        driver_elements: List[Dict[str, Any]], 
+        from_loc: str, 
+        to_loc: str,
+        M: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze appending new work to end of duty"""
+        
+        # Find the last travel element and END FACILITY
+        last_travel = None
+        last_travel_index = None
+        end_facility_index = None
+        
+        for i, element in enumerate(driver_elements):
+            if element.get("is_travel"):
+                last_travel = element
+                last_travel_index = i
+            elif str(element.get("element_type", "")).upper() == "END FACILITY":
+                end_facility_index = i
+        
+        if last_travel is None:
+            return {"strategy": "error", "error": "Could not find any travel elements to append after"}
+        
+        last_location = last_travel.get("to", "")
+        
+        return {
+            "strategy": "duty_append",
+            "insertion_index": end_facility_index or len(driver_elements),  # Insert before END FACILITY
+            "last_travel_element": last_travel,
+            "last_location": last_location,
+            "new_route": (from_loc, to_loc),
+            "positioning_required": last_location.upper() != from_loc.upper(),
+            "sequence": [
+                {"type": "positioning", "from": last_location, "to": from_loc, "load": "EMPTY"},
+                {"type": "assignment", "from": from_loc, "to": to_loc, "load": "LOADED"},
+                {"type": "return", "from": to_loc, "to": "TBD", "load": "EMPTY"}  # Return to base
+            ],
+            "description": f"Append after current duty: {last_location} -> {from_loc} (empty) -> {to_loc} (loaded) -> base"
+        }
+
+    def get_location_name_by_id(location_id: int, M: Dict[str, Any]) -> Optional[str]:
+        """Get location name from location ID using the matrices lookup"""
+        loc2idx = M.get("loc2idx", {})
+        for name, idx in loc2idx.items():
+            if int(idx) == int(location_id):
+                return name
+        return None
+
+    def _compute_before_after_schedules(
+        DATA: Dict[str, Any],
+        assignments: List[AssignmentOut],
+        cascades: List[Dict[str, Any]],
+    ) -> List[DriverScheduleOut]:
+        """
+        UPDATED: Build per-driver schedules using the new duty analysis functions.
+        """
+        # Import the enhanced lookup functions
+        from .geo import enhanced_distance_time_lookup, build_loc_meta_from_locations_csv
+        
+        def debug_log(msg):
+            print(f"DEBUG SCHEDULE: {msg}", file=sys.stderr, flush=True)
+        
+        debug_log(f"Processing {len(assignments)} assignments and {len(cascades)} cascades")
+        
+        ds = DATA.get("driver_states", {})
+        drivers = ds.get("drivers", ds) if isinstance(ds, dict) else {}
+
+        # Get affected drivers from assignments and cascades
+        affected_driver_ids = set()
+        for a in assignments:
+            if a.driver_id:
+                affected_driver_ids.add(a.driver_id)
+        for c in cascades:
+            if c.get("driver_id"):
+                affected_driver_ids.add(c["driver_id"])
+        
+        debug_log(f"Affected drivers: {affected_driver_ids}")
+        
+        # Safety limit
+        if len(affected_driver_ids) > 10:
+            affected_driver_ids = set(list(affected_driver_ids)[:10])
+        
+        schedule_map: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        
+        # Initialize with original schedules for affected drivers
+        for drv_id in affected_driver_ids:
+            if drv_id not in drivers:
+                debug_log(f"WARNING: Driver {drv_id} not found in driver_states")
+                continue
+                
+            meta = drivers[drv_id]
+            before = list(meta.get("elements", []))
+            after = [dict(e) for e in before]  # Deep copy for modification
+            schedule_map[drv_id] = {"before": before, "after": after}
+            debug_log(f"Driver {drv_id} has {len(before)} original elements")
+
+        # Build matrices reference for duty analysis
+        M = {
+            "dist": DATA["distance"],
+            "time": DATA["time"],
+            "loc2idx": DATA["location_to_index"],
+        }
+        
+        # Build location metadata for coordinate lookups
+        loc_meta: Dict[str, Dict[str, Any]] = {}
+        try:
+            if DATA.get("locations_df") is not None:
+                loc_meta = build_loc_meta_from_locations_csv(DATA["locations_df"])
+                debug_log(f"Built location metadata for {len(loc_meta)} locations")
+        except Exception as e:
+            debug_log(f"WARNING: Could not build location metadata: {e}")
+
+        # Process cascades first (remove displaced legs)
+        debug_log(f"Processing {len(cascades)} cascades...")
+        for c in cascades:
+            driver_id = c.get("driver_id")
+            from_loc = str(c.get("from", "")).upper()
+            to_loc = str(c.get("to", "")).upper()
+            
+            if driver_id and from_loc and to_loc and driver_id in schedule_map:
+                after_schedule = schedule_map[driver_id]["after"]
+                
+                # Remove the displaced leg
+                removed = False
+                for idx in range(len(after_schedule) - 1, -1, -1):
+                    e = after_schedule[idx]
+                    if (e.get("is_travel") and 
+                        str(e.get("from", "")).upper() == from_loc and 
+                        str(e.get("to", "")).upper() == to_loc):
+                        del after_schedule[idx]
+                        debug_log(f"REMOVED displaced leg: {from_loc} → {to_loc} from {driver_id}")
+                        removed = True
+                        break
+                if not removed:
+                    debug_log(f"WARNING: Could not find leg to remove: {from_loc} → {to_loc} from {driver_id}")
+
+        # Process assignments (reconstruct duties with new work)
+        debug_log(f"Processing {len(assignments)} assignments...")
+        for i, assignment in enumerate(assignments):
+            debug_log(f"Assignment {i}: {assignment.trip_id} -> Driver {assignment.driver_id} ({assignment.type})")
+            
+            if assignment.type != "reassigned" or not assignment.driver_id:
+                debug_log(f"SKIPPING assignment {i} - type: {assignment.type}, driver: {assignment.driver_id}")
+                continue
+                
+            driver_id = assignment.driver_id
+            if driver_id not in schedule_map:
+                debug_log(f"WARNING: Driver {driver_id} not in schedule_map")
+                continue
+                
+            debug_log(f"Processing assignment for driver {driver_id}")
+            debug_log(f"Trip ID: {assignment.trip_id}")
+            debug_log(f"Candidate ID: {assignment.candidate_id}")
+            
+            # Get current schedule state
+            driver_elements = schedule_map[driver_id]["after"]
+            debug_log(f"Driver {driver_id} has {len(driver_elements)} elements before insertion")
+            
+            # Try insertion analysis
+            try:
+                insertion_analysis = analyze_duty_insertion_point(assignment, driver_elements, M)
+                debug_log(f"Insertion analysis result: {insertion_analysis.get('strategy')}")
+                
+                if insertion_analysis.get("strategy") == "error":
+                    debug_log(f"Insertion analysis failed: {insertion_analysis.get('error')}")
+                    debug_log("Falling back to simple append")
+                    _fallback_append_assignment(assignment, schedule_map[driver_id]["after"], M, loc_meta)
+                    continue
+                
+                # Apply the insertion strategy (now with loc_meta)
+                debug_log(f"Applying strategy: {insertion_analysis.get('strategy')}")
+                success = _apply_insertion_strategy(assignment, insertion_analysis, schedule_map[driver_id]["after"], M, loc_meta)
+                
+                if not success:
+                    debug_log("Insertion strategy failed, falling back to append")
+                    _fallback_append_assignment(assignment, schedule_map[driver_id]["after"], M, loc_meta)
+                else:
+                    debug_log("Successfully applied insertion strategy")
+                    
+            except Exception as e:
+                debug_log(f"ERROR: Exception in insertion analysis: {e}")
+                debug_log("Falling back to simple append")
+                _fallback_append_assignment(assignment, schedule_map[driver_id]["after"], M, loc_meta)
+            
+            # Check final state
+            final_elements = len(schedule_map[driver_id]["after"])
+            debug_log(f"Driver {driver_id} now has {final_elements} elements after processing")
+
+        # Return driver schedules
+        out: List[DriverScheduleOut] = []
+        for drv_id, schedule_data in schedule_map.items():
+            debug_log(f"Final schedule for {drv_id}: {len(schedule_data['before'])} -> {len(schedule_data['after'])} elements")
+            out.append(DriverScheduleOut(
+                driver_id=drv_id, 
+                before=schedule_data["before"],
+                after=schedule_data["after"]
+            ))
+        
+        debug_log("Schedule computation completed")
+        return out
+
+    def _apply_insertion_strategy(
+        assignment: AssignmentOut, 
+        analysis: Dict[str, Any], 
+        after_schedule: List[Dict[str, Any]], 
+        M: Dict[str, Any],
+        loc_meta: Dict[str, Any]  # Added parameter
+    ) -> bool:
+        """Apply the insertion strategy to reconstruct the duty."""
+        
+        strategy = analysis.get("strategy")
+        new_route = analysis.get("new_route")
+        
+        if not new_route:
+            return False
+            
+        from_loc, to_loc = new_route
+        
+        try:
+            if strategy == "empty_replacement":
+                return _apply_empty_replacement(assignment, analysis, after_schedule)
+                
+            elif strategy == "slack_replacement":
+                return _apply_slack_replacement(assignment, analysis, after_schedule, M, loc_meta)  # Added loc_meta
+                
+            elif strategy == "leg_swap":
+                return _apply_leg_swap(assignment, analysis, after_schedule, M, loc_meta)  # Added loc_meta
+                
+            elif strategy == "duty_append":
+                return _apply_duty_append(assignment, analysis, after_schedule, M, loc_meta)  # Added loc_meta
+                
+            else:
+                print(f"Unknown insertion strategy: {strategy}", file=sys.stderr, flush=True)
+                return False
+                
+        except Exception as e:
+            print(f"Error applying {strategy}: {e}", file=sys.stderr, flush=True)
+            return False
+
+    def _apply_empty_replacement(
+        assignment: AssignmentOut, 
+        analysis: Dict[str, Any], 
+        after_schedule: List[Dict[str, Any]]
+    ) -> bool:
+        """Replace an empty leg with the new loaded assignment."""
+        
+        insertion_index = analysis.get("insertion_index")
+        target_element = analysis.get("target_element")
+        new_route = analysis.get("new_route")
+        
+        if insertion_index is None or not target_element or not new_route:
+            return False
+            
+        from_loc, to_loc = new_route
+        
+        # Update the existing element to be loaded
+        new_element = dict(target_element)
+        new_element.update({
+            "from": from_loc,
+            "to": to_loc,
+            "priority": 1,  # High priority for new assignment
+            "load_type": "URGENT_DELIVERY",
+            "planz_code": "NEW_ASSIGNMENT",
+            "note": f"🔄 LOADED: {from_loc} → {to_loc} (was empty)"
+        })
+        
+        after_schedule[insertion_index] = new_element
+        print(f"✅ Empty replacement: {from_loc} → {to_loc}")
+        return True
+
+    def _apply_slack_replacement(
+        assignment: AssignmentOut, 
+        analysis: Dict[str, Any], 
+        after_schedule: List[Dict[str, Any]], 
+        M: Dict[str, Any],
+        loc_meta: Dict[str, Any]
+    ) -> bool:
+        """Replace AS DIRECTED time with complete pickup + delivery sequence."""
+        
+        insertion_index = analysis.get("insertion_index")
+        slack_element = analysis.get("slack_element")
+        slack_location = analysis.get("slack_location")
+        new_route = analysis.get("new_route")
+        
+        if insertion_index is None or not slack_element or not slack_location or not new_route:
+            return False
+            
+        from_loc, to_loc = new_route
+        slack_start = slack_element.get("start_min")
+        
+        # GET LOC_META from DATA (you'll need to pass this in)
+        # For now, use empty dict - you may need to modify function signature
+        loc_meta = {}  # TODO: Pass this from caller
+        
+        current_time = slack_start
+        sequence = []
+        
+        # 1. Positioning to pickup (if needed)
+        if slack_location.upper() != from_loc.upper():
+            pos_miles, pos_time, pos_warning = enhanced_distance_time_lookup(
+                slack_location, from_loc, M, loc_meta
+            )
+            
+            sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": slack_location,
+                "to": from_loc,
+                "start_min": current_time,
+                "end_min": current_time + pos_time,
+                "duration_min": pos_time,
+                "miles": pos_miles,
+                "priority": 2,
+                "load_type": "EMPTY",
+                "planz_code": "POSITIONING",
+                "note": f"🚚 POSITIONING: {slack_location} → {from_loc} {pos_warning}".strip()
+            })
+            current_time += pos_time
+        
+        # 2. Loading at pickup
+        sequence.append({
+            "element_type": "LOAD(ASSIST)",
+            "is_travel": False,
+            "from": from_loc,
+            "to": from_loc,
+            "start_min": current_time,
+            "end_min": current_time + 30,
+            "duration_min": 30,
+            "miles": 0.0,
+            "priority": 1,
+            "load_type": "LOADING",
+            "planz_code": "LOAD_ASSIST",
+            "note": f"📦 LOADING at {from_loc}"
+        })
+        current_time += 30
+        
+        # 3. Delivery leg  
+        del_miles, del_time, del_warning = enhanced_distance_time_lookup(
+            from_loc, to_loc, M, loc_meta
+        )
+        
+        sequence.append({
+            "element_type": "TRAVEL", 
+            "is_travel": True,
+            "from": from_loc,
+            "to": to_loc,
+            "start_min": current_time,
+            "end_min": current_time + del_time,
+            "duration_min": del_time,
+            "miles": del_miles,
+            "priority": 1,
+            "load_type": "URGENT_DELIVERY",
+            "planz_code": "NEW_ASSIGNMENT", 
+            "note": f"📦 LOADED: {from_loc} → {to_loc} {del_warning}".strip()
+        })
+        current_time += del_time
+        
+        # 4. Unloading at delivery
+        sequence.append({
+            "element_type": "UNLOAD(ASSIST)",
+            "is_travel": False,
+            "from": to_loc,
+            "to": to_loc,
+            "start_min": current_time,
+            "end_min": current_time + 30,
+            "duration_min": 30,
+            "miles": 0.0,
+            "priority": 1,
+            "load_type": "UNLOADING", 
+            "planz_code": "UNLOAD_ASSIST",
+            "note": f"📦 UNLOADING at {to_loc}"
+        })
+        
+        # Replace the AS DIRECTED element
+        del after_schedule[insertion_index]
+        for i, element in enumerate(sequence):
+            after_schedule.insert(insertion_index + i, element)
+            
+        print(f"✅ Slack replacement: Complete sequence with enhanced lookup", file=sys.stderr)
+        return True
+
+    def _apply_leg_swap(
+        assignment: AssignmentOut, 
+        analysis: Dict[str, Any], 
+        after_schedule: List[Dict[str, Any]], 
+        M: Dict[str, Any],
+        loc_meta: Dict[str, Any]
+    ) -> bool:
+        """Swap an existing leg with the new assignment."""
+        
+        insertion_index = analysis.get("insertion_index")
+        target_element = analysis.get("target_element")
+        original_route = analysis.get("original_route")
+        new_route = analysis.get("new_route")
+        
+        if insertion_index is None or not target_element or not new_route:
+            return False
+            
+        from_loc, to_loc = new_route
+        orig_from, orig_to = original_route
+        
+        # LOOK UP ACTUAL DISTANCE AND TIME
+        loc2idx = M["loc2idx"]
+        dist_matrix = M["dist"]
+        time_matrix = M["time"]
+        
+        def get_distance_time(from_name: str, to_name: str):
+            try:
+                i = loc2idx.get(from_name.upper())
+                j = loc2idx.get(to_name.upper()) 
+                if i is not None and j is not None:
+                    return float(dist_matrix[i, j]), float(time_matrix[i, j])
+            except Exception:
+                pass
+            return 0.0, 30.0  # Fallback
+        
+        new_dist, new_time = get_distance_time(from_loc, to_loc)
+        
+        # Replace the existing leg
+        new_element = {
+            "element_type": "TRAVEL",
+            "is_travel": True,
+            "from": from_loc,
+            "to": to_loc,
+            "start_min": target_element.get("start_min"),
+            "end_min": target_element.get("start_min", 0) + new_time,  # Calculate end time
+            "duration_min": new_time,
+            "miles": new_dist,
+            "priority": 1,
+            "load_type": "URGENT_DELIVERY",
+            "planz_code": "NEW_ASSIGNMENT",
+            "note": f"🔄 SWAPPED: {orig_from}→{orig_to} with {from_loc}→{to_loc}"
+        }
+        
+        after_schedule[insertion_index] = new_element
+        print(f"✅ Leg swap: {orig_from}→{orig_to} replaced with {from_loc}→{to_loc} ({new_time}min, {new_dist:.1f}mi)", file=sys.stderr)
+        return True
+    
+    def _apply_duty_append(
+        assignment: AssignmentOut, 
+        analysis: Dict[str, Any], 
+        after_schedule: List[Dict[str, Any]], 
+        M: Dict[str, Any],
+        loc_meta: Dict[str, Any]
+    ) -> bool:
+        """Append new work to the end of the duty with complete operational sequence."""
+        
+        from .geo import enhanced_distance_time_lookup
+        
+        insertion_index = analysis.get("insertion_index", len(after_schedule))
+        last_location = analysis.get("last_location")
+        new_route = analysis.get("new_route")
+        positioning_required = analysis.get("positioning_required", False)
+        
+        if not new_route:
+            return False
+            
+        from_loc, to_loc = new_route
+        
+        # Find the end time of the last travel element
+        current_time = None
+        for element in reversed(after_schedule):
+            if element.get("is_travel") and element.get("end_min") is not None:
+                current_time = element.get("end_min")
+                break
+        
+        if current_time is None:
+            current_time = 480  # 8 AM fallback
+            print(f"WARNING: Could not find last travel time, using 8 AM fallback", file=sys.stderr)
+        
+        # Build the complete sequence
+        append_elements = []
+        
+        # 1. Positioning/deadhead leg (if needed)
+        if positioning_required and last_location and last_location.upper() != from_loc.upper():
+            pos_miles, pos_time, pos_warning = enhanced_distance_time_lookup(
+                last_location, from_loc, M, loc_meta
+            )
+            
+            append_elements.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": last_location,
+                "to": from_loc,
+                "start_min": current_time,
+                "end_min": current_time + pos_time,
+                "duration_min": pos_time,
+                "miles": pos_miles,
+                "priority": 2,
+                "load_type": "EMPTY",
+                "planz_code": "POSITIONING",
+                "note": f"🚚 DEADHEAD: {last_location} → {from_loc} {pos_warning}".strip()
+            })
+            current_time += pos_time
+        
+        # 2. Loading time at pickup location
+        append_elements.append({
+            "element_type": "LOAD(ASSIST)",
+            "is_travel": False,
+            "from": from_loc,
+            "to": from_loc,  # Same location for loading
+            "start_min": current_time,
+            "end_min": current_time + 30,  # 30 min loading time
+            "duration_min": 30,
+            "miles": 0.0,
+            "priority": 1,
+            "load_type": "LOADING",
+            "planz_code": "LOAD_ASSIST",
+            "note": f"📦 LOADING at {from_loc}"
+        })
+        current_time += 30
+        
+        # 3. Main delivery leg (loaded)
+        del_miles, del_time, del_warning = enhanced_distance_time_lookup(
+            from_loc, to_loc, M, loc_meta
+        )
+        
+        append_elements.append({
+            "element_type": "TRAVEL",
+            "is_travel": True,
+            "from": from_loc,
+            "to": to_loc,
+            "start_min": current_time,
+            "end_min": current_time + del_time,
+            "duration_min": del_time,
+            "miles": del_miles,
+            "priority": 1,
+            "load_type": "URGENT_DELIVERY",
+            "planz_code": "NEW_ASSIGNMENT",
+            "note": f"📦 LOADED: {from_loc} → {to_loc} {del_warning}".strip()
+        })
+        current_time += del_time
+        
+        # 4. Unloading time at delivery location
+        append_elements.append({
+            "element_type": "UNLOAD(ASSIST)",
+            "is_travel": False,
+            "from": to_loc,
+            "to": to_loc,  # Same location for unloading
+            "start_min": current_time,
+            "end_min": current_time + 30,  # 30 min unloading time
+            "duration_min": 30,
+            "miles": 0.0,
+            "priority": 1,
+            "load_type": "UNLOADING",
+            "planz_code": "UNLOAD_ASSIST",
+            "note": f"📦 UNLOADING at {to_loc}"
+        })
+        current_time += 30
+        
+        # 5. Return to base (if END FACILITY exists)
+        end_facility_location = None
+        for element in after_schedule:
+            if str(element.get("element_type", "")).upper() == "END FACILITY":
+                end_facility_location = element.get("from")
+                break
+        
+        if end_facility_location and end_facility_location.upper() != to_loc.upper():
+            ret_miles, ret_time, ret_warning = enhanced_distance_time_lookup(
+                to_loc, end_facility_location, M, loc_meta
+            )
+            
+            append_elements.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": to_loc,
+                "to": end_facility_location,
+                "start_min": current_time,
+                "end_min": current_time + ret_time,
+                "duration_min": ret_time,
+                "miles": ret_miles,
+                "priority": 2,
+                "load_type": "EMPTY",
+                "planz_code": "RETURN_TO_BASE",
+                "note": f"🏠 RETURN: {to_loc} → {end_facility_location} {ret_warning}".strip()
+            })
+            current_time += ret_time
+        
+        # Insert before END FACILITY
+        end_facility_index = len(after_schedule)
+        for i, element in enumerate(after_schedule):
+            if str(element.get("element_type", "")).upper() == "END FACILITY":
+                end_facility_index = i
+                break
+        
+        # Insert all elements
+        for i, element in enumerate(append_elements):
+            after_schedule.insert(end_facility_index + i, element)
+            
+        # Update END FACILITY time
+        for element in after_schedule:
+            if str(element.get("element_type", "")).upper() == "END FACILITY":
+                element["start_min"] = current_time
+                element["end_min"] = current_time
+                break
+            
+        print(f"✅ Duty append: Complete sequence {from_loc} → {to_loc} ({len(append_elements)} elements)", file=sys.stderr)
+        return True
+
+    def _fallback_append_assignment(
+        assignment: AssignmentOut, 
+        after_schedule: List[Dict[str, Any]],
+        M: Dict[str, Any],
+        loc_meta: Dict[str, Any]  # Add this parameter
+    ):
+        """Fallback: simple append when insertion analysis fails."""
+        
+        # Parse route from trip_id
+        trip_id = assignment.trip_id
+        from_loc = to_loc = None
+        
+        if ":" in trip_id and "->" in trip_id:
+            route_part = trip_id.split(":", 1)[1].split("@")[0]
+            if "->" in route_part:
+                parts = route_part.split("->", 1)
+                from_loc = parts[0].strip()
+                to_loc = parts[1].strip()
+                
+                # Clean up location names
+                import re
+                from_loc = re.sub(r'\s*\([^)]*\)\s*', '', from_loc).strip()
+                to_loc = re.sub(r'\s*\([^)]*\)\s*', '', to_loc).strip()
+        
+        if from_loc and to_loc:
+            fallback_element = {
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": from_loc,
+                "to": to_loc,
+                "start_min": None,
+                "end_min": None,
+                "priority": 1,
+                "load_type": "URGENT_DELIVERY",
+                "planz_code": "NEW_ASSIGNMENT",
+                "note": f"⚠️ FALLBACK: {from_loc} → {to_loc}"
+            }
+            after_schedule.append(fallback_element)
+            print(f"⚠️ Fallback append: {from_loc} → {to_loc}")
     # ------------------- Endpoints -------------------
 
     @router.post("/candidates", response_model=PlanCandidatesResponse)
