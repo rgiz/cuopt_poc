@@ -335,19 +335,35 @@ def create_router(
                 break
 
             cand_req = PlanRequest(
-                start_location=trip["start_location"],
-                end_location=trip["end_location"],
+                start_location=root_trip["start_location"],
+                end_location=root_trip["end_location"],
                 mode=req.mode,
                 when_local=req.when_local,
-                priority=prio,
+                priority=req.priority,
                 top_n=50,
-                trip_minutes=trip["duration_minutes"],
-                trip_miles=trip["trip_miles"],
+                trip_minutes=root_trip["duration_minutes"],
+                trip_miles=root_trip["trip_miles"],
             )
             wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS)
             total_candidates_seen += len(cands)
+    
+            chosen = None
+            if req.preferred_candidate_id and req.preferred_driver_id:
+                # Find the specific candidate that matches the UI selection
+                for candidate in cands:
+                    if (candidate.candidate_id == req.preferred_candidate_id and 
+                        candidate.driver_id == req.preferred_driver_id):
+                        chosen = candidate
+                        break
+                
+                # If we couldn't find the exact match, log it and fall back to first candidate
+                if chosen is None:
+                    print(f"WARNING: Could not find preferred candidate {req.preferred_candidate_id} for driver {req.preferred_driver_id}")
+                    chosen = cands[0] if cands else None
+            else:
+                # Original logic: use first candidate
+                chosen = cands[0] if cands else None
 
-            chosen = cands[0] if cands else None
             if chosen is None:
                 base = float(cfg.get("outsourcing_base_cost", 200.0))
                 cost = base + trip["trip_miles"] * out_per_mile

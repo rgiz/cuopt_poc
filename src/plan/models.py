@@ -56,6 +56,8 @@ class PlanRequest(BaseModel):
 class PlanSolveCascadeRequest(PlanRequest):
     max_cascades: int = Field(2, ge=0, le=5)
     max_drivers_affected: int = Field(5, ge=1, le=50)
+    preferred_candidate_id: Optional[str] = None  # ADD THIS
+    preferred_driver_id: Optional[str] = None     # ADD THIS
 
 
 class CandidateOut(BaseModel):

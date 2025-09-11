@@ -45,15 +45,38 @@ def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def detect_col(df: pd.DataFrame, *cands) -> Optional[str]:
+    """Enhanced column detection that handles spaces and case variations"""
     cols = set(df.columns)
+    
+    # First try exact matches
     for c in cands:
-        if c and c.lower() in cols:
-            return c.lower()
-    # fuzzy: first col containing candidate substring
-    for c in cols:
-        for cand in cands:
-            if cand and cand.lower() in c:
-                return c
+        if c and c in cols:
+            return c
+    
+    # Then try lowercase matches
+    for c in cands:
+        if c and c.lower() in {col.lower() for col in cols}:
+            # Find the actual column name
+            for actual_col in cols:
+                if actual_col.lower() == c.lower():
+                    return actual_col
+    
+    # Then try matches with spaces converted to underscores
+    for c in cands:
+        if c:
+            # Convert candidate to space format
+            space_version = c.replace("_", " ")
+            for actual_col in cols:
+                if actual_col.lower() == space_version.lower():
+                    return actual_col
+    
+    # Finally, try substring matches
+    for c in cands:
+        if c:
+            for actual_col in cols:
+                if c.lower() in actual_col.lower():
+                    return actual_col
+    
     return None
 
 def hhmmss_to_min(s: str) -> int:
@@ -350,6 +373,13 @@ def condense_elements(rsl: pd.DataFrame, li_map: Dict[str,int], priority_map: Di
                 "duration_min": duration_min,
                 "load_type": load_type,
                 "priority": prio,
+                "Mon": int(r.get("mon", "0")),
+                "Tue": int(r.get("tue", "0")), 
+                "Wed": int(r.get("wed", "0")),
+                "Thu": int(r.get("thu", "0")),
+                "Fri": int(r.get("fri", "0")),
+                "Sat": int(r.get("sat", "0")),
+                "Sun": int(r.get("sun", "0")),
             })
         out[str(duty_id)] = rows
     return out
