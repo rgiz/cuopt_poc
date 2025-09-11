@@ -83,31 +83,27 @@ def create_router(
         cascades: List[Dict[str, Any]],
     ) -> List[DriverScheduleOut]:
         """
-        FIXED: Build per-driver schedules ONLY for affected drivers to prevent infinite loops.
+        FIXED: Build per-driver schedules showing the new assignments properly.
         """
         ds = DATA.get("driver_states", {})
         drivers = ds.get("drivers", ds) if isinstance(ds, dict) else {}
 
-        # CRITICAL FIX: Only process drivers that are actually affected
+        # Get affected drivers from assignments and cascades
         affected_driver_ids = set()
-        
-        # Add drivers from assignments
         for a in assignments:
             if a.driver_id:
                 affected_driver_ids.add(a.driver_id)
-        
-        # Add drivers from cascades
         for c in cascades:
             if c.get("driver_id"):
                 affected_driver_ids.add(c["driver_id"])
         
-        # SAFETY: Limit to max 10 drivers to prevent UI overload
+        # Safety limit
         if len(affected_driver_ids) > 10:
             affected_driver_ids = set(list(affected_driver_ids)[:10])
         
         schedule_map: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         
-        # ONLY process affected drivers
+        # Process only affected drivers
         for drv_id in affected_driver_ids:
             if drv_id not in drivers:
                 continue
@@ -117,58 +113,143 @@ def create_router(
             after = [dict(e) for e in before]  # Shallow copy
             schedule_map[drv_id] = {"before": before, "after": after}
 
-        # Process displacements (remove displaced legs)
-        displaced = []
+        # Remove displaced legs from after schedules (cascades)
+        displaced_legs = []
         for c in cascades:
             d = c.get("driver_id")
             fr = str(c.get("from", "")).upper()
             to = str(c.get("to", "")).upper()
             if d and fr and to and d in schedule_map:
-                displaced.append((d, fr, to))
+                displaced_legs.append((d, fr, to))
 
-        # Remove displaced legs from after schedules
-        for (drv_id, fr, to) in displaced:
+        for (drv_id, fr, to) in displaced_legs:
             if drv_id not in schedule_map:
                 continue
             after = schedule_map[drv_id]["after"]
-            for idx, e in enumerate(after):
+            for idx in range(len(after) - 1, -1, -1):  # Reverse iteration for safe removal
+                e = after[idx]
                 if (e.get("is_travel") and 
-                    str(e.get("from","")).upper() == fr and 
-                    str(e.get("to","")).upper() == to):
+                    str(e.get("from", "")).upper() == fr and 
+                    str(e.get("to", "")).upper() == to):
                     del after[idx]
                     break
 
-        # Add new assigned legs (simplified)
         for a in assignments:
             if a.type == "reassigned" and a.driver_id and a.driver_id in schedule_map:
-                if isinstance(a.trip_id, str) and (a.trip_id.startswith("NEW:") or a.trip_id.startswith("CASCADE:")):
-                    # Extract route info from trip_id
-                    core = a.trip_id.split("@", 1)[0]
-                    if ":" in core:
-                        core = core.split(":", 1)[1]
-                    if "->" in core:
-                        fr, to = core.split("->", 1)
-                        leg = {
+                # Parse the new route from trip_id
+                trip_id = a.trip_id
+                
+                # Extract start and end locations from various trip_id formats
+                from_loc = None
+                to_loc = None
+                
+                if ":" in trip_id and "->" in trip_id:
+                    # Format: "NEW:AMAZON (STN8) MK17 7AB->Midlands Super Hub@2025-09-02T10:30"
+                    route_part = trip_id.split(":", 1)[1].split("@")[0]
+                    if "->" in route_part:
+                        parts = route_part.split("->")
+                        from_loc = parts[0].strip()
+                        to_loc = parts[1].strip()
+                        
+                        # Clean up location names (remove postcodes/codes in parentheses)
+                        import re
+                        from_loc = re.sub(r'\s*\([^)]*\)\s*', '', from_loc).strip()
+                        to_loc = re.sub(r'\s*\([^)]*\)\s*', '', to_loc).strip()
+                
+                # If we successfully parsed the route, add it to the schedule
+                if from_loc and to_loc:
+                    candidate_id = a.candidate_id or ""
+                    
+                    # Determine insertion strategy based on candidate type
+                    if "slack@" in candidate_id:
+                        # Replace AS DIRECTED time with new assignment
+                        after_schedule = schedule_map[a.driver_id]["after"]
+                        
+                        # Find and replace AS DIRECTED element
+                        for idx, element in enumerate(after_schedule):
+                            element_type = str(element.get("element_type", "")).upper()
+                            if "AS DIRECTED" in element_type:
+                                # Replace the AS DIRECTED element with new assignment
+                                new_element = {
+                                    "element_type": "TRAVEL",
+                                    "is_travel": True,
+                                    "from": from_loc,
+                                    "to": to_loc,
+                                    "start_min": element.get("start_min"),
+                                    "end_min": element.get("end_min"),
+                                    "priority": 1,  # High priority new assignment
+                                    "note": f"NEW: {from_loc} → {to_loc}",
+                                    "planz_code": "NEW_ASSIGNMENT",
+                                    "load_type": "URGENT_DELIVERY"
+                                }
+                                after_schedule[idx] = new_element
+                                break
+                    
+                    elif "append" in candidate_id:
+                        # Add to end of schedule
+                        new_element = {
+                            "element_type": "TRAVEL",
                             "is_travel": True,
-                            "from": str(fr).upper(),
-                            "to": str(to).upper(),
-                            "note": f"Added: {a.trip_id}",
-                            "delay_min": a.delay_minutes or 0,
-                            "miles": a.miles_delta or 0
+                            "from": from_loc,
+                            "to": to_loc,
+                            "start_min": None,  # Will be calculated
+                            "end_min": None,
+                            "priority": 1,
+                            "note": f"APPENDED: {from_loc} → {to_loc}",
+                            "planz_code": "NEW_ASSIGNMENT",
+                            "load_type": "URGENT_DELIVERY"
                         }
-                        schedule_map[a.driver_id]["after"].append(leg)
+                        schedule_map[a.driver_id]["after"].append(new_element)
+                    
+                    elif "swap_leg@" in candidate_id or "take_empty@" in candidate_id:
+                        # Insert or replace existing leg
+                        new_element = {
+                            "element_type": "TRAVEL", 
+                            "is_travel": True,
+                            "from": from_loc,
+                            "to": to_loc,
+                            "start_min": None,
+                            "end_min": None,
+                            "priority": 1,
+                            "note": f"SWAPPED: {from_loc} → {to_loc}",
+                            "planz_code": "NEW_ASSIGNMENT",
+                            "load_type": "URGENT_DELIVERY"
+                        }
+                        schedule_map[a.driver_id]["after"].append(new_element)
+                    
+                    else:
+                        # Default: append to end
+                        new_element = {
+                            "element_type": "TRAVEL",
+                            "is_travel": True,
+                            "from": from_loc,
+                            "to": to_loc,
+                            "start_min": None,
+                            "end_min": None,
+                            "priority": 1,
+                            "note": f"ADDED: {from_loc} → {to_loc}",
+                            "planz_code": "NEW_ASSIGNMENT", 
+                            "load_type": "URGENT_DELIVERY"
+                        }
+                        schedule_map[a.driver_id]["after"].append(new_element)
 
-        # Return only affected driver schedules
+
+
+
+
+
+        
+        # Return driver schedules
         out: List[DriverScheduleOut] = []
         for drv_id, m in schedule_map.items():
             out.append(DriverScheduleOut(
                 driver_id=drv_id, 
-                before=m["before"][:20],  # SAFETY: Limit elements shown
-                after=m["after"][:20]     # SAFETY: Limit elements shown
+                before=m["before"][:20],  # Limit elements shown
+                after=m["after"][:20]     # Limit elements shown
             ))
         
         return out
-
+    
     def _bounds_from_when_local(when_local: str, minutes: float | None, mode: str, sla_windows: Dict[int, Dict[str, int]]) -> tuple[int, int]:
         """
         Convert ISO local like '2025-09-02T10:30' into [earliest, latest] minute bounds
@@ -319,6 +400,8 @@ def create_router(
                             })
                             queue.append((displaced_trip, leg_pri, depth + 1))
 
+        schedules = _compute_before_after_schedules(DATA, all_assignments, cascades)
+
         return PlanSolveCascadeResponse(
             weekday=weekday_from_local(req.when_local),
             trip_minutes=trip_minutes,
@@ -332,6 +415,7 @@ def create_router(
             },
             candidates_considered=total_candidates_seen,
             cascades=cascades,
+            schedules=schedules,  # ADD THIS LINE
         )
 
     @router.post("/solve_multi", response_model=PlanSolveMultiResponse)

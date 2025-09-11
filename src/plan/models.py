@@ -104,6 +104,7 @@ class PlanSolveCascadeResponse(BaseModel):
     details: Dict[str, Any]
     candidates_considered: int
     cascades: List[Dict[str, Any]]
+    schedules: List[DriverScheduleOut] = [] 
 
 
 # -----------------------------

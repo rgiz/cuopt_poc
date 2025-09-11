@@ -1,5 +1,6 @@
-
 import os, requests, pandas as pd, streamlit as st
+import json
+
 API = os.getenv("API_BASE_URL", "http://backend:8000")
 
 st.set_page_config(page_title="Dynamic Trip Rescheduling", layout="wide")
@@ -18,11 +19,21 @@ def format_time(minutes):
     except (ValueError, TypeError):
         return str(minutes)
 
-# --- Fetch location metadata (name + postcode) ---
+# Initialize session state
+if 'selected_candidate' not in st.session_state:
+    st.session_state.selected_candidate = None
+if 'candidates_data' not in st.session_state:
+    st.session_state.candidates_data = None
+if 'trip_info' not in st.session_state:
+    st.session_state.trip_info = None
+
+# --- SECTION 1: INPUTS ---
+st.header("1. Trip Details")
+
+# Fetch location metadata
 try:
     locs_resp = requests.get(f"{API}/plan/locations", timeout=10).json()
     locations = locs_resp.get("locations", [])
-    # Sort locations alphabetically by name
     locations = sorted(locations, key=lambda x: x["name"])
     names = [loc["name"] for loc in locations]
     name_to_postcode = {loc["name"]: loc.get("postcode", "N/A") for loc in locations}
@@ -31,230 +42,45 @@ except Exception as e:
     names = []
     name_to_postcode = {}
 
-# --- UI Inputs ---
+# Location inputs
 col1, col2 = st.columns(2)
 with col1:
     start = st.selectbox(
         "Start location", 
         names, 
-        key="start_location_unique",
+        key="start_location",
         help="Type to search locations"
     )
-    st.text_input("Start postcode", name_to_postcode.get(start, ""), disabled=True, key="start_pc_display")
+    if start:
+        st.text(f"📍 {name_to_postcode.get(start, 'No postcode')}")
 
 with col2:
     end = st.selectbox(
         "End location", 
         names, 
-        key="end_location_unique",
+        key="end_location",
         help="Type to search locations"
     )
-    st.text_input("End postcode", name_to_postcode.get(end, ""), disabled=True, key="end_pc_display")
+    if end:
+        st.text(f"📍 {name_to_postcode.get(end, 'No postcode')}")
 
 # Trip parameters
 col3, col4, col5 = st.columns(3)
 with col3:
-    mode = st.selectbox("Mode", ["depart_after", "arrive_before"], key="mode_unique")
+    mode = st.selectbox("Mode", ["depart_after", "arrive_before"], key="mode")
 with col4:
-    dt = st.text_input("When (Europe/London)", "2025-09-02T10:30", key="datetime_unique")
+    dt = st.text_input("When (Europe/London)", "2025-09-02T10:30", key="datetime")
 with col5:
-    priority = st.slider("Priority (1=highest, 5=lowest)", 1, 5, 3, key="priority_unique")
+    priority = st.slider("Priority (1=highest, 5=lowest)", 1, 5, 3, key="priority")
 
-# Solution parameters
-st.subheader("Solution Options")
-col6, col7, col8 = st.columns(3)
-with col6:
-    max_solutions = st.slider("Max solutions", 1, 5, 3, key="max_sol_unique")
-with col7:
-    max_cascades = st.slider("Max cascade depth", 0, 2, 1, key="max_casc_unique")
-with col8:
-    max_drivers = st.slider("Max drivers affected", 1, 5, 3, key="max_drv_unique")
+# Advanced options (collapsible)
+with st.expander("Advanced Options"):
+    topn = st.slider("Max candidates to show", 5, 50, 20, key="topn")
 
-use_cuopt = st.checkbox("Use cuOpt optimization", value=False, key="cuopt_unique")
+# --- SECTION 2: FIND CANDIDATES ---
+st.header("2. Find Candidates")
 
-# --- Single Solve Button ---
-if st.button("Find Solutions", disabled=not (start and end), type="primary", key="solve_unique"):
-    payload = {
-        "start_location": start,
-        "end_location": end,
-        "mode": mode,
-        "when_local": dt,
-        "priority": priority,
-        "top_n_per_step": 3,
-        "max_cascades": max_cascades,
-        "max_drivers_affected": max_drivers,
-        "max_solutions": max_solutions,
-        "use_cuopt": use_cuopt
-    }
-    
-    with st.spinner("Finding optimal solutions..."):
-        try:
-            r = requests.post(f"{API}/plan/solve_multi", json=payload, timeout=60)
-            r.raise_for_status()
-            data = r.json()
-            
-            st.success(f"Found {len(data.get('solutions', []))} solutions")
-            st.caption(f"Trip: {data['trip_minutes']:.1f} mins, {data['trip_miles']:.1f} miles, {data['weekday']}")
-            
-            sols = data.get("solutions", [])
-            if not sols:
-                st.warning("No feasible solutions found. Try relaxing constraints.")
-            else:
-                for i, s in enumerate(sols):
-                    cost = s.get('objective_value', 0)
-                    drivers_affected = s.get('drivers_touched', 0)
-                    
-                    with st.expander(f"Solution {i+1}: Cost £{cost:.2f} ({drivers_affected} drivers affected)", expanded=(i==0)):
-                        
-                        # Show assignments
-                        assignments = s.get("assignments", [])
-                        if assignments:
-                            st.markdown("**Trip Assignments:**")
-                            assign_df = pd.DataFrame(assignments)
-                            cols_to_drop = ["type", "candidate_id", "cost_breakdown"]
-                            assign_df = assign_df.drop(columns=cols_to_drop, errors="ignore")
-                            st.dataframe(assign_df, use_container_width=True)
-                        
-                        # Show cascades
-                        cascades = s.get("cascades", [])
-                        if cascades:
-                            st.markdown("**Cascade Effects:**")
-                            casc_df = pd.DataFrame(cascades)
-                            st.dataframe(casc_df, use_container_width=True)
-                        
-                        # Show ONLY affected driver schedules
-                        schedules = s.get("schedules", [])
-                        if assignments:
-                            assigned_drivers = {a.get('driver_id') for a in assignments if a.get('driver_id')}
-                            affected_schedules = [sch for sch in schedules if sch.get('driver_id') in assigned_drivers]
-                        else:
-                            affected_schedules = schedules[:3]  # Limit to first 3 if no specific assignments
-                        
-                        if affected_schedules:
-                            st.markdown("**Affected Driver Schedules:**")
-                            
-                            for sch in affected_schedules:
-                                driver_id = sch.get('driver_id')
-                                
-                                # Create expandable section for each driver
-                                with st.expander(f"Driver {driver_id} Schedule Changes"):
-                                    col_before, col_after = st.columns(2)
-                                    
-                                    with col_before:
-                                        st.markdown("**Before:**")
-                                        before_data = sch.get("before", [])
-                                        if before_data:
-                                            # Convert to DataFrame and format times
-                                            before_df = pd.DataFrame(before_data)
-                                            
-                                            # Format time columns if they exist
-                                            if 'start_min' in before_df.columns:
-                                                before_df['start_time'] = before_df['start_min'].apply(format_time)
-                                            if 'end_min' in before_df.columns:
-                                                before_df['end_time'] = before_df['end_min'].apply(format_time)
-                                            
-                                            # Show relevant columns
-                                            display_cols = []
-                                            for col in ['element_type', 'from', 'to', 'start_time', 'end_time', 'priority']:
-                                                if col in before_df.columns:
-                                                    display_cols.append(col)
-                                            
-                                            if display_cols:
-                                                st.dataframe(before_df[display_cols], use_container_width=True)
-                                            else:
-                                                st.dataframe(before_df.head(10), use_container_width=True)
-                                        else:
-                                            st.write("No scheduled activities")
-                                    
-                                    with col_after:
-                                        st.markdown("**After:**")
-                                        after_data = sch.get("after", [])
-                                        if after_data:
-                                            # Convert to DataFrame and format times
-                                            after_df = pd.DataFrame(after_data)
-                                            
-                                            # Format time columns if they exist
-                                            if 'start_min' in after_df.columns:
-                                                after_df['start_time'] = after_df['start_min'].apply(format_time)
-                                            if 'end_min' in after_df.columns:
-                                                after_df['end_time'] = after_df['end_min'].apply(format_time)
-                                            
-                                            # Add Due To Convey display if available
-                                            if 'due_to_convey' in after_df.columns:
-                                                after_df['load_type_display'] = after_df['due_to_convey'].fillna('UNKNOWN')
-                                            elif 'load_type' in after_df.columns:
-                                                after_df['load_type_display'] = after_df['load_type'].fillna('UNKNOWN')
-                                            elif 'planz_code' in after_df.columns:
-                                                after_df['load_type_display'] = after_df['planz_code'].fillna('UNKNOWN')
-                                            else:
-                                                after_df['load_type_display'] = 'UNKNOWN'
-                                            
-                                            # Show priority with Load Type
-                                            if 'priority' in after_df.columns:
-                                                after_df['priority_display'] = after_df['priority'].fillna(3).astype(int)
-                                            else:
-                                                after_df['priority_display'] = 3
-                                            
-                                            # Mark new/changed items
-                                            if 'note' in after_df.columns:
-                                                after_df['changes'] = after_df['note'].fillna('')
-                                            else:
-                                                after_df['changes'] = ''
-                                            
-                                            # Show relevant columns with Load Type and Priority
-                                            display_cols = []
-                                            col_mapping = {
-                                                'element_type': 'Type',
-                                                'from': 'From', 
-                                                'to': 'To', 
-                                                'start_time': 'Start', 
-                                                'end_time': 'End',
-                                                'load_type_display': 'Load Type',
-                                                'priority_display': 'Priority',
-                                                'changes': 'Changes'
-                                            }
-                                            
-                                            for col, display_name in col_mapping.items():
-                                                if col in after_df.columns:
-                                                    display_cols.append(col)
-                                            
-                                            if display_cols:
-                                                display_df = after_df[display_cols].rename(columns=col_mapping)
-                                                st.dataframe(display_df.head(10), use_container_width=True)
-                                            else:
-                                                st.dataframe(after_df.head(10), use_container_width=True)
-                                        else:
-                                            st.write("No scheduled activities")
-                        
-                        # Solution details
-                        if s.get("details"):
-                            with st.expander("Technical Details"):
-                                st.json(s["details"])
-                        
-        except requests.exceptions.Timeout:
-            st.error("Request timed out. Try reducing max solutions or cascade depth.")
-        except Exception as e:
-            st.error(f"Solution failed: {e}")
-            st.text("Please check if the backend is running and try again.")
-
-# System status in sidebar
-with st.sidebar:
-    st.header("System Status")
-    try:
-        health = requests.get(f"{API}/health", timeout=5).json()
-        st.success("✅ Backend connected")
-        st.text(f"Locations: {health.get('locations', 'Unknown')}")
-        st.text(f"cuOpt: {'Available' if 'cuopt_url' in health else 'Unavailable'}")
-    except:
-        st.error("❌ Backend unavailable")
-
-# mode = st.selectbox("Mode", ["depart_after", "arrive_before"], key="trip_mode")
-# dt = st.text_input("When (Europe/London)", "2025-09-02T10:30", key="trip_when")
-# priority = st.slider("Priority (1=highest urgency, 5=lowest)", 1, 5, 3, key="priority_slider")
-# topn = st.slider("Top N", 1, 50, 10, key="topn_slider")
-
-# --- Submit ---
-if st.button("Find candidates", disabled=not (start and end), key="find_candidates_btn1"):
+if st.button("Find Candidates", disabled=not (start and end), type="primary", key="find_candidates"):
     payload = {
         "start_location": start,
         "end_location": end,
@@ -263,117 +89,260 @@ if st.button("Find candidates", disabled=not (start and end), key="find_candidat
         "priority": priority,
         "top_n": topn
     }
-    r = requests.post(f"{API}/plan/candidates", json=payload, timeout=30)
-    if r.status_code != 200:
-        st.error(r.text)
+    
+    with st.spinner("Searching for candidates..."):
+        try:
+            r = requests.post(f"{API}/plan/candidates", json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            
+            # Store in session state
+            st.session_state.candidates_data = data
+            st.session_state.trip_info = {
+                "trip_minutes": data['trip_minutes'],
+                "trip_miles": data['trip_miles'],
+                "weekday": data['weekday']
+            }
+            st.session_state.selected_candidate = None  # Reset selection
+            
+            st.success(f"Found {len(data.get('candidates', []))} candidates")
+            
+        except Exception as e:
+            st.error(f"Request failed: {e}")
+            st.session_state.candidates_data = None
+
+# Display candidates if available
+if st.session_state.candidates_data:
+    data = st.session_state.candidates_data
+    trip_info = st.session_state.trip_info
+    
+    st.info(f"Trip: {trip_info['trip_minutes']:.1f} mins, {trip_info['trip_miles']:.1f} miles, {trip_info['weekday']}")
+    
+    candidates = data.get("candidates", [])
+    if candidates:
+        st.subheader("Available Candidates")
+        
+        # Create a more user-friendly display
+        for i, candidate in enumerate(candidates):
+            candidate_summary = f"{candidate.get('driver_id', 'N/A')} - "
+            
+            # Parse candidate type
+            cid = candidate.get('candidate_id', '')
+            if 'take_empty' in cid:
+                candidate_summary += f"Take empty slot (Cost: £{candidate.get('est_cost', 0):.2f})"
+            elif 'swap_leg' in cid:
+                candidate_summary += f"Swap existing leg (Cost: £{candidate.get('est_cost', 0):.2f})"
+            elif 'append' in cid:
+                candidate_summary += f"Add to end of duty (Cost: £{candidate.get('est_cost', 0):.2f}, +{candidate.get('overtime_minutes', 0):.0f}min overtime)"
+            elif 'slack' in cid:
+                candidate_summary += f"Use slack time (Cost: £{candidate.get('est_cost', 0):.2f})"
+            else:
+                candidate_summary += f"Other solution (Cost: £{candidate.get('est_cost', 0):.2f})"
+            
+            # Add feasibility indicator
+            if not candidate.get('feasible_hard', True):
+                candidate_summary += " ⚠️ Not feasible"
+            
+            # Create button for selection
+            if st.button(
+                candidate_summary, 
+                key=f"candidate_{i}",
+                help=f"Deadhead: {candidate.get('deadhead_miles', 0):.1f} miles, Delay: {candidate.get('delay_minutes', 0):.0f} mins"
+            ):
+                st.session_state.selected_candidate = candidate
+                st.rerun()
     else:
-        data = r.json()
-        st.caption(f"Trip mins={data['trip_minutes']:.1f}, miles={data['trip_miles']:.1f}, weekday={data['weekday']}")
-        df = pd.DataFrame(data.get("candidates", []))
-        if not df.empty:
-            df = df.drop(columns=["type"], errors="ignore")  # Remove 'type' column
-            st.dataframe(df)
-        else:
-            st.info("No candidates.")
+        st.warning("No candidates found. Try adjusting the priority or time window.")
 
-# Other input options
-mode = st.selectbox("Mode", ["depart_after", "arrive_before"])
-dt = st.text_input("When (Europe/London)", "2025-09-02T10:30")
-priority = st.slider("Priority (1=highest urgency, 5=lowest)", 1, 5, 3)
-topn = st.slider("Top N candidates", 1, 50, 10)
-min_slack = st.slider("Min slack (mins)", 0, 180, 0)
+# --- SECTION 3: SOLUTION PANEL ---
+st.header("3. Solution Details")
 
-# Submit to backend and show results
-if st.button("Find candidates", disabled=not (start and end), key="find_candidates_btn2"):
-    payload = {
-        "start_location": start,
-        "end_location": end,
-        "mode": mode,
-        "when_local": dt,
-        "priority": priority,
-        "top_n": topn,
-        "min_slack": min_slack,
-    }
+if st.session_state.selected_candidate:
+    candidate = st.session_state.selected_candidate
+    
+    st.success(f"Selected: Driver {candidate.get('driver_id')} - {candidate.get('candidate_id')}")
+    
+    # Show candidate details
+    col_details1, col_details2, col_details3 = st.columns(3)
+    with col_details1:
+        st.metric("Cost", f"£{candidate.get('est_cost', 0):.2f}")
+    with col_details2:
+        st.metric("Deadhead Miles", f"{candidate.get('deadhead_miles', 0):.1f}")
+    with col_details3:
+        st.metric("Overtime Minutes", f"{candidate.get('overtime_minutes', 0):.0f}")
+    
+    # Get full solution with cascades
+    if st.button("Show Full Solution (with cascades)", type="primary", key=f"solve_{candidate.get('driver_id', 'unknown')}"):
+        cascade_payload = {
+            "start_location": start,
+            "end_location": end,
+            "mode": mode,
+            "when_local": dt,
+            "priority": priority,
+            "max_cascades": 2,
+            "max_drivers_affected": 5,
+            "force_candidate": candidate.get('candidate_id')  # Force this specific candidate
+        }
+        
+        with st.spinner("Computing cascades..."):
+            try:
+                r = requests.post(f"{API}/plan/solve_cascades", json=cascade_payload, timeout=60)
+                r.raise_for_status()
+                solution_data = r.json()
+                
+                st.success(f"Total Solution Cost: £{solution_data.get('objective_value', 0):.2f}")
+                
+                # Show assignments
+                assignments = solution_data.get("assignments", [])
+                if assignments:
+                    st.subheader("Trip Assignments")
+                    assign_df = pd.DataFrame(assignments)
+                    # Clean up for display
+                    display_cols = ['trip_id', 'driver_id', 'type', 'cost', 'delay_minutes', 'overtime_minutes']
+                    available_cols = [col for col in display_cols if col in assign_df.columns]
+                    st.dataframe(assign_df[available_cols], use_container_width=True)
+                
+                # Show cascades if any
+                cascades = solution_data.get("cascades", [])
+                if cascades:
+                    st.subheader("Cascade Effects")
+                    st.info(f"Found {len(cascades)} displaced trips that need reassignment")
+                    casc_df = pd.DataFrame(cascades)
+                    st.dataframe(casc_df, use_container_width=True)
+                
+                # Get driver schedules directly from solve_cascades response
+                schedules_from_cascades = solution_data.get("schedules", [])
+                
+                if schedules_from_cascades:
+                    st.subheader("Driver Schedule Changes")
+                    
+                    for sch in schedules_from_cascades:
+                        driver_id = sch.get('driver_id')
+                        
+                        with st.expander(f"Driver {driver_id} Schedule", expanded=True):
+                            col_before, col_after = st.columns(2)
+                            
+                            with col_before:
+                                st.markdown("**Before:**")
+                                before_data = sch.get("before", [])
+                                if before_data:
+                                    before_df = pd.DataFrame(before_data)
+                                    
+                                    # Format time columns if they exist
+                                    if 'start_min' in before_df.columns:
+                                        before_df['start_time'] = before_df['start_min'].apply(format_time)
+                                    if 'end_min' in before_df.columns:
+                                        before_df['end_time'] = before_df['end_min'].apply(format_time)
+                                    
+                                    # Show relevant columns
+                                    display_cols = []
+                                    for col in ['element_type', 'from', 'to', 'start_time', 'end_time', 'priority']:
+                                        if col in before_df.columns:
+                                            display_cols.append(col)
+                                    
+                                    if display_cols:
+                                        st.dataframe(before_df[display_cols], use_container_width=True)
+                                    else:
+                                        st.dataframe(before_df.head(10), use_container_width=True)
+                                else:
+                                    st.write("No scheduled activities")
+                            
+                            with col_after:
+                                st.markdown("**After:**")
+                                after_data = sch.get("after", [])
+                                if after_data:
+                                    after_df = pd.DataFrame(after_data)
+                                    
+                                    # Format time columns if they exist
+                                    if 'start_min' in after_df.columns:
+                                        after_df['start_time'] = after_df['start_min'].apply(format_time)
+                                    if 'end_min' in after_df.columns:
+                                        after_df['end_time'] = after_df['end_min'].apply(format_time)
+                                    
+                                    # Add load type display
+                                    if 'load_type' in after_df.columns:
+                                        after_df['load_type_display'] = after_df['load_type'].fillna('UNKNOWN')
+                                    elif 'planz_code' in after_df.columns:
+                                        after_df['load_type_display'] = after_df['planz_code'].fillna('UNKNOWN')
+                                    else:
+                                        after_df['load_type_display'] = 'UNKNOWN'
+                                    
+                                    # Show priority
+                                    if 'priority' in after_df.columns:
+                                        after_df['priority_display'] = after_df['priority'].fillna(3).astype(int)
+                                    else:
+                                        after_df['priority_display'] = 3
+                                    
+                                    # Mark changes
+                                    if 'note' in after_df.columns:
+                                        after_df['changes'] = after_df['note'].fillna('')
+                                    else:
+                                        after_df['changes'] = ''
+                                    
+                                    # Display columns
+                                    col_mapping = {
+                                        'element_type': 'Type',
+                                        'from': 'From', 
+                                        'to': 'To', 
+                                        'start_time': 'Start', 
+                                        'end_time': 'End',
+                                        'load_type_display': 'Load Type',
+                                        'priority_display': 'Priority',
+                                        'changes': 'Changes'
+                                    }
+                                    
+                                    display_cols = []
+                                    for col in col_mapping.keys():
+                                        if col in after_df.columns:
+                                            display_cols.append(col)
+                                    
+                                    if display_cols:
+                                        display_df = after_df[display_cols].rename(columns=col_mapping)
+                                        st.dataframe(display_df.head(10), use_container_width=True)
+                                    else:
+                                        st.dataframe(after_df.head(10), use_container_width=True)
+                                else:
+                                    st.write("No scheduled activities")
+                else:
+                    # Fallback: if solve_cascades doesn't return schedules, show assignment info
+                    st.subheader("Affected Drivers")
+                    affected_drivers = set()
+                    for assignment in assignments:
+                        if assignment.get('driver_id'):
+                            affected_drivers.add(assignment['driver_id'])
+                    
+                    if affected_drivers:
+                        for driver_id in affected_drivers:
+                            st.info(f"Driver {driver_id} - schedule changes applied (detailed view not available)")
+                    else:
+                        st.warning("No driver assignments found")
+                
+            except Exception as e:
+                st.error(f"Failed to get full solution: {e}")
+                st.text("Try selecting a different candidate or check backend connectivity")
+
+elif st.session_state.candidates_data:
+    st.info("👆 Select a candidate above to see the full solution with cascades")
+else:
+    st.info("👆 Find candidates first to see solution options")
+
+# --- SIDEBAR: SYSTEM STATUS ---
+with st.sidebar:
+    st.header("System Status")
     try:
-        r = requests.post(f"{API}/plan/candidates", json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        st.caption(f"Trip mins={data['trip_minutes']:.1f}, miles={data['trip_miles']:.1f}, weekday={data['weekday']}")
-
-        df = pd.DataFrame(data.get("candidates", []))
-        if not df.empty:
-            df = df.drop(columns=["type"], errors="ignore")
-            st.dataframe(df)
-        else:
-            st.info("No candidates found.")
-    except Exception as e:
-        st.error(f"Request failed: {e}")
-
-st.subheader("Solve with multiple options (cascades)")
-
-colA, colB, colC = st.columns(3)
-with colA:
-    max_solutions = st.slider("Max solutions", 1, 10, 5, key="max_solutions")
-with colB:
-    top_n_per_step = st.slider("Branch factor (per step)", 1, 5, 3, key="branch_factor")
-with colC:
-    max_cascades = st.slider("Max cascade depth", 0, 4, 2, key="max_cascades")
-
-use_cuopt = st.checkbox("Refine with cuOpt (if configured)", value=False)
-
-if st.button("Solve (multi)", disabled=not (start and end), key="solve_multi_btn"):
-    payload = {
-        "start_location": start,
-        "end_location": end,
-        "mode": mode,
-        "when_local": dt,
-        "priority": priority,
-        "top_n_per_step": top_n_per_step,
-        "max_cascades": max_cascades,
-        "max_drivers_affected": 3,
-        "max_solutions": max_solutions,
-        "use_cuopt": use_cuopt
-    }
-    try:
-        r = requests.post(f"{API}/plan/solve_multi", json=payload, timeout=60)
-        r.raise_for_status()
-        data = r.json()
-        st.caption(f"Trip mins={data['trip_minutes']:.1f}, miles={data['trip_miles']:.1f}, weekday={data['weekday']}")
-        sols = data.get("solutions", [])
-        if not sols:
-            st.info("No feasible solutions found.")
-        else:
-            for s in sols:
-                with st.expander(f"#{s['rank']}: cost={s['objective_value']:.2f}, drivers touched={s['drivers_touched']}"):
-                    # assignments table
-                    assign_df = pd.DataFrame(s.get("assignments", []))
-                    if not assign_df.empty:
-                        assign_df = assign_df.drop(columns=["type"], errors="ignore")
-                        st.markdown("**Assignments**")
-                        st.dataframe(assign_df)
-
-                    # cascades table
-                    casc_df = pd.DataFrame(s.get("cascades", []))
-                    if not casc_df.empty:
-                        st.markdown("**Cascades**")
-                        st.dataframe(casc_df)
-
-                    # schedules (before/after) per driver
-                    schedules = s.get("schedules", [])
-                    for sch in schedules:
-                        st.markdown(f"**Driver {sch['driver_id']}**")
-                        b = pd.DataFrame(sch.get("before", []))
-                        a = pd.DataFrame(sch.get("after", []))
-                        st.markdown("_Before_")
-                        if b.empty:
-                            st.write("—")
-                        else:
-                            st.dataframe(b)
-                        st.markdown("_After_")
-                        if a.empty:
-                            st.write("—")
-                        else:
-                            st.dataframe(a)
-    except Exception as e:
-        st.error(f"Solve failed: {e}")
-
+        health = requests.get(f"{API}/health", timeout=5).json()
+        st.success("✅ Backend connected")
+        st.text(f"Locations: {health.get('locations', 'Unknown')}")
+        st.text(f"cuOpt: {'Available' if 'cuopt_url' in health else 'Unavailable'}")
+        
+        if health.get('status') != 'ok':
+            st.warning("⚠️ Backend needs data reload")
+    except:
+        st.error("❌ Backend unavailable")
+    
+    # Debug info (collapsible)
+    with st.expander("Debug Info"):
+        st.text(f"API URL: {API}")
+        st.text(f"Session state keys: {list(st.session_state.keys())}")
+        if st.session_state.candidates_data:
+            st.text(f"Candidates loaded: {len(st.session_state.candidates_data.get('candidates', []))}")
