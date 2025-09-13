@@ -14,7 +14,7 @@ from .models import (
 from .cuopt_adapter import solve_with_cuopt
 from .config import load_priority_map, load_sla_windows
 from .candidates import generate_candidates, weekday_from_local
-from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates
+from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
 
 
 def create_router(
@@ -942,9 +942,7 @@ def create_router(
     def plan_candidates(req: PlanRequest):
         DATA, M, LOC_META = ensure_ready()
         cfg = get_cost_config()
-        weekday, trip_minutes, trip_miles, cands = generate_candidates(
-            req, DATA, M, cfg, LOC_META, SLA_WINDOWS
-        )
+        weekday, trip_minutes, trip_miles, cands = generate_candidates(req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
         return PlanCandidatesResponse(
             weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
         )
@@ -995,7 +993,7 @@ def create_router(
                 trip_minutes=root_trip["duration_minutes"],
                 trip_miles=root_trip["trip_miles"],
             )
-            wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS)
+            wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
             total_candidates_seen += len(cands)
     
             chosen = None
@@ -1172,7 +1170,7 @@ def create_router(
                 trip_minutes=trip.get("duration_minutes"),
                 trip_miles=trip.get("trip_miles"),
             )
-            wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS)
+            wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
             # Sort by our current greedy preference (generate_candidates likely returns already sorted best-first)
             topK = cands[: req.top_n_per_step]
             # Also include a fallback 'outsourced' branch (if allowed)
@@ -1331,3 +1329,4 @@ def create_router(
         return {"locations": [], "count": 0, "source": "none"}
 
     return router
+# Force reload
