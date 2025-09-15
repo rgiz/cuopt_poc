@@ -63,3 +63,16 @@ services:
     volumes:
       - ./:/app
     restart: unless-stopped
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    container_name: osrm-backend
+    ports:
+      - "5001:5000"  # Using 5001 to avoid conflict with cuOpt on 5000
+    volumes:
+      - ${DATA_ROOT:-./data}:/data
+    working_dir: /data/osrm
+    # Don't start automatically - we need to preprocess first
+    profiles: ["manual"]
+    command: osrm-routed --algorithm mld /data/osrm/great-britain-latest.osrm
+    restart: unless-stopped
