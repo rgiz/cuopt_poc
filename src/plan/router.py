@@ -10,17 +10,14 @@ from .models import (
     PlanSolveCascadeRequest, PlanSolveCascadeResponse, AssignmentOut,
     PlanSolveMultiRequest, PlanSolveMultiResponse, PlanSolutionOut, DriverScheduleOut
 )
-# from .cuopt_adapter import build_cuopt_payload, solve_with_cuopt, extract_solutions_from_cuopt
-from .cuopt_adapter import solve_with_cuopt
+
 from .config import load_priority_map, load_sla_windows
 from .candidates import generate_candidates, weekday_from_local
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
 
-
 def create_router(
     get_data: Callable[[], Optional[Dict[str, Any]]],
     get_cost_config: Callable[[], Dict[str, float]],
-    get_cuopt_url: Callable[[], str],
 ) -> APIRouter:
     """
     Factory that returns the /plan router. Uses callables to fetch the
@@ -1271,35 +1268,35 @@ def create_router(
         for r, s in enumerate(solutions, 1):
             s.rank = r
 
-        # Optional: refine with cuOpt if requested
-        if req.use_cuopt and solutions:
-            try:
-                cuopt_url = get_cuopt_url()
-                refined = []
-                for s in solutions[: req.max_solutions]:
-                    # Build one payload per candidate (you can also batch if your cuOpt supports)
-                    payload = build_cuopt_payload(
-                        DATA=DATA,
-                        request_trip=root_trip,
-                        assignments_so_far=[a.dict() for a in s.assignments],
-                        priorities=PRIORITY_MAP,
-                        sla_windows=SLA_WINDOWS,
-                        M=M,
-                        new_req_window=[earliest, latest],  # pass down
-                    )
-                    raw = solve_with_cuopt(cuopt_url, payload)
-                    variants = extract_solutions_from_cuopt(raw, max_solutions=1)
-                    if variants:
-                        v = variants[0]
-                        s.objective_value = float(v.get("objective_value", s.objective_value))
-                        s.details["backend"] = "cuopt"
-                # resort after refinement
-                solutions.sort(key=lambda s: (s.objective_value, s.drivers_touched))
-                for r, s in enumerate(solutions, 1):
-                    s.rank = r
-            except Exception as e:
-                # Non-fatal: keep heuristic results
-                pass
+        # # Optional: refine with cuOpt if requested
+        # if req.use_cuopt and solutions:
+        #     try:
+        #         cuopt_url = get_cuopt_url()
+        #         refined = []
+        #         for s in solutions[: req.max_solutions]:
+        #             # Build one payload per candidate (you can also batch if your cuOpt supports)
+        #             payload = build_cuopt_payload(
+        #                 DATA=DATA,
+        #                 request_trip=root_trip,
+        #                 assignments_so_far=[a.dict() for a in s.assignments],
+        #                 priorities=PRIORITY_MAP,
+        #                 sla_windows=SLA_WINDOWS,
+        #                 M=M,
+        #                 new_req_window=[earliest, latest],  # pass down
+        #             )
+        #             raw = solve_with_cuopt(cuopt_url, payload)
+        #             variants = extract_solutions_from_cuopt(raw, max_solutions=1)
+        #             if variants:
+        #                 v = variants[0]
+        #                 s.objective_value = float(v.get("objective_value", s.objective_value))
+        #                 s.details["backend"] = "cuopt"
+        #         # resort after refinement
+        #         solutions.sort(key=lambda s: (s.objective_value, s.drivers_touched))
+        #         for r, s in enumerate(solutions, 1):
+        #             s.rank = r
+        #     except Exception as e:
+        #         # Non-fatal: keep heuristic results
+        #         pass
 
         return PlanSolveMultiResponse(
             weekday=weekday_from_local(req.when_local),

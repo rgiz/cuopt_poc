@@ -20,203 +20,86 @@ class CuOptModel:
         max_solve_time_seconds: int = 30,
         **kwargs
     ):
+        # Handle case where driver_states is None or empty
+        if driver_states is None:
+            driver_states = {}
+        
+        # Ensure driver_states has the expected structure
+        if "drivers" not in driver_states:
+            driver_states = {"drivers": driver_states}
+            
         self.driver_states = driver_states
         self.distance = distance_miles_matrix
         self.time = time_minutes_matrix
         self.loc2idx = {str(k).upper(): int(v) for k, v in location_to_index.items()}
-        self.cost = cost_config
+        self.cost = cost_config or {}
         self.server_url = str(server_url or "").rstrip("/")
         self.max_time = int(max_solve_time_seconds)
+        
+        # Cost coefficients for objective function
+        self.deadhead_cost_per_mile = self.cost.get("deadhead_cost_per_mile", 1.0)
+        self.overtime_cost_per_minute = self.cost.get("overtime_cost_per_minute", 1.0)
+        self.admin_cost = self.cost.get("reassignment_admin_cost", 10.0)
 
-    def _request_and_poll(self, problem_data: Dict[str, Any], timeout: int = 300) -> Dict[str, Any]:
-        """
-        Submit asynchronous request to cuOpt 25.10.0a and poll for results.
-        """
-        # Step 1: Submit request to new async endpoint
-        headers = {
-            'Content-Type': 'application/json',
-            'CLIENT-VERSION': 'custom'  # Skip version compatibility check
+    def get_diagnostic_info(self) -> Dict[str, Any]:
+        """Get diagnostic information about the model's data"""
+        drivers = self.driver_states.get("drivers", {})
+        
+        return {
+            "driver_states_structure": {
+                "has_drivers_key": "drivers" in self.driver_states,
+                "num_drivers": len(drivers),
+                "driver_ids": list(drivers.keys())[:5],
+                "sample_driver": list(drivers.values())[0] if drivers else None
+            },
+            "matrices": {
+                "distance_shape": self.distance.shape if hasattr(self.distance, 'shape') else "unknown",
+                "time_shape": self.time.shape if hasattr(self.time, 'shape') else "unknown",
+                "num_locations": len(self.loc2idx)
+            },
+            "cost_config": self.cost,
+            "server_url": self.server_url
         }
-        
-        submit_url = f"{self.server_url}/cuopt/request"
-        
-        try:
-            response = requests.post(
-                submit_url,
-                json=problem_data,
-                headers=headers,
-                timeout=30
-            )
-            
-            if response.status_code == 404:
-                raise RuntimeError(f"Endpoint not found. Ensure cuOpt container is running and accessible at {submit_url}")
-            
-            response.raise_for_status()
-            initial_response = response.json()
-            
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Failed to submit request to cuOpt: {e}")
-        
-        # Check if response contains immediate result (unlikely in 25.x)
-        if 'response' in initial_response and 'solver_response' in initial_response['response']:
-            return initial_response['response']
-        
-        # Step 2: Extract request ID for polling
-        if 'reqId' not in initial_response:
-            raise RuntimeError(f"No request ID in response: {initial_response}")
-            
-        request_id = initial_response['reqId']
-        
-        # Step 3: Poll for results
-        poll_url = f"{self.server_url}/cuopt/requests/{request_id}"
-        start_time = time.time()
-        attempts = 0
-        max_retries = timeout
-        
-        while attempts < max_retries and (time.time() - start_time) < timeout:
-            try:
-                poll_response = requests.get(
-                    poll_url,
-                    headers={'Content-Type': 'application/json'},
-                    timeout=30
-                )
-                
-                if poll_response.status_code == 404:
-                    # Request ID not ready yet, continue polling
-                    time.sleep(1)
-                    attempts += 1
-                    continue
-                    
-                poll_response.raise_for_status()
-                result = poll_response.json()
-                
-                # Check if result contains the solution
-                if 'response' in result:
-                    solver_response = result['response'].get('solver_response', {})
-                    
-                    # Check solver status
-                    if solver_response.get('status') == 0:  # 0 = feasible solution
-                        return result['response']
-                    elif solver_response.get('status') == 1:  # 1 = infeasible
-                        raise RuntimeError(f"cuOpt found no feasible solution: {solver_response}")
-                    else:
-                        # Still processing
-                        time.sleep(1)
-                        attempts += 1
-                        continue
-                        
-                # Check for explicit status field
-                status = result.get('status', '').lower()
-                if status == 'failed':
-                    error_msg = result.get('error', 'Unknown error')
-                    raise RuntimeError(f"cuOpt job failed: {error_msg}")
-                    
-                # Continue polling
-                time.sleep(1)
-                attempts += 1
-                
-            except requests.exceptions.RequestException as e:
-                # Network error - retry
-                time.sleep(1)
-                attempts += 1
-                continue
-        
-        # Timeout reached
-        raise TimeoutError(f"Request {request_id} timed out after {timeout}s")
-    
-    def solve(self, disrupted_trips, candidates_per_trip, params=None) -> CuOptSolution:
-        """Solve using NVIDIA cuOpt API"""
-        
-        if not disrupted_trips:
-            return CuOptSolution(0.0, [], {"backend": "empty"})
 
+    def basic_connectivity_test(self) -> Dict[str, Any]:
+        """Test basic cuOpt connectivity without requiring driver data"""
         try:
-            # Build proper cuOpt payload
-            payload = self._build_cuopt_payload(disrupted_trips, candidates_per_trip)
+            test_payload = {
+                "cost_matrix_data": {
+                    "data": {"0": [[0, 10], [10, 0]]}
+                },
+                "fleet_data": {
+                    "vehicle_locations": [[0, 0]],
+                    "vehicle_time_windows": [[0, 1440]],
+                    "capacities": [[100]],
+                    "vehicle_types": [1]
+                },
+                "task_data": {
+                    "task_locations": [1],
+                    "task_time_windows": [[0, 1440]],
+                    "service_times": [5],
+                    "demand": [[1]]
+                },
+                "solver_config": {
+                    "time_limit": 5
+                }
+            }
             
-            # Submit request and poll for result
-            result = self._request_and_poll(payload, timeout=self.max_time)
+            headers = {'Content-Type': 'application/json', 'CLIENT-VERSION': 'custom'}
+            submit_url = f"{self.server_url}/cuopt/request"
             
-            # Parse result
-            objective = result.get('solver_response', {}).get('solution_cost', 0.0)
-            routes = result.get('solver_response', {}).get('vehicle_data', {})
+            response = requests.post(submit_url, json=test_payload, headers=headers, timeout=10)
             
-            # Convert routes to assignments
-            assignments = []
-            for vehicle_id, route_data in routes.items():
-                route = route_data.get('route', [])
-                for i, location in enumerate(route[1:-1], 1):  # Skip depot start/end
-                    assignments.append({
-                        "trip_id": f"task_{location}",
-                        "driver_id": vehicle_id,
-                        "cost": objective / len(routes) if routes else 0.0
-                    })
-            
-            return CuOptSolution(
-                objective_value=float(objective),
-                assignments=assignments,
-                details={"backend": "cuopt", "request_successful": True}
-            )
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "response_preview": str(response.text)[:200] + "..." if len(response.text) > 200 else response.text,
+                "url_tested": submit_url
+            }
             
         except Exception as e:
-            # Fallback to greedy
-            return self._greedy_fallback(disrupted_trips)
-
-    def _build_cuopt_payload(self, disrupted_trips, candidates_per_trip) -> Dict[str, Any]:
-        """Build proper NVIDIA cuOpt payload format"""
-        
-        # Build cost matrix from your distance matrix
-        n_locations = self.distance.shape[0]
-        cost_matrix = self.distance.tolist()
-        
-        # Build vehicles from driver states
-        vehicles = []
-        ds = self.driver_states.get("drivers", {})
-        for i, (driver_id, meta) in enumerate(ds.items()):
-            home_loc = meta.get("home_center_id", 0)
-            if home_loc is None or home_loc < 0:
-                home_loc = 0
-            
-            vehicles.append({
-                "start_location": home_loc,
-                "end_location": home_loc,
-                "time_window": [
-                    meta.get("start_min", 0),
-                    meta.get("end_min", 1440)
-                ]
-            })
-
-        # Build tasks from disrupted trips
-        tasks = []
-        for trip in disrupted_trips:
-            start_loc = self.loc2idx.get(trip["start_location"].upper(), 0)
-            end_loc = self.loc2idx.get(trip["end_location"].upper(), 0)
-            
-            tasks.append({
-                "location": start_loc,  # Pickup location
-                "time_window": [0, 1440],  # Wide time window
-                "service_time": trip.get("duration_minutes", 0),
-                "demand": 1  # Default demand
-            })
-
-        # Build the complete payload in NVIDIA cuOpt format
-        return {
-            "cost_matrix_data": {
-                "data": {
-                    "0": cost_matrix
-                }
-            },
-            "fleet_data": {
-                "vehicle_locations": [[v["start_location"], v["end_location"]] for v in vehicles],
-                "vehicle_time_windows": [v["time_window"] for v in vehicles]
-            },
-            "task_data": {
-                "task_locations": [t["location"] for t in tasks],
-                "task_time_windows": [t["time_window"] for t in tasks],
-                "service_times": [t["service_time"] for t in tasks],
-                "demand": [[t["demand"]] for t in tasks]
-            },
-            "solver_config": {
-                "time_limit": self.max_time
+            return {
+                "success": False,
+                "error": str(e),
+                "url_tested": f"{self.server_url}/cuopt/request"
             }
-        }

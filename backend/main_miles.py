@@ -45,7 +45,7 @@ from src.plan.router import create_router as create_plan_router
 # --------------------------------------------------------------------------------------------------
 DEBUG_API = os.getenv("DEBUG_API", "1") == "1"
 BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data")).resolve()
-DATASET_DIR = BASE_DIR / "active" if (BASE_DIR / "active").exists() else BASE_DIR
+DATASET_DIR = BASE_DIR / "private" / "active" if (BASE_DIR / "private" / "active").exists() else BASE_DIR
 CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000").rstrip("/v2").rstrip("/")
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*")
 ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS.split(",") if o.strip()] or ["*"]
@@ -185,7 +185,7 @@ def create_app() -> FastAPI:
 
     app.include_router(settings_router)
     app.include_router(admin_router())
-    app.include_router(create_plan_router(lambda: DATA, lambda: COST_CONFIG, lambda: CUOPT_URL))
+    app.include_router(create_plan_router(lambda: DATA, lambda: COST_CONFIG))
 
     register_routes(app)
     return app
