@@ -46,6 +46,9 @@ from src.plan.router import create_router as create_plan_router
 DEBUG_API = os.getenv("DEBUG_API", "1") == "1"
 BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data")).resolve()
 DATASET_DIR = BASE_DIR / "private" / "active" if (BASE_DIR / "private" / "active").exists() else BASE_DIR
+
+print(f"[startup] Using DATASET_DIR: {DATASET_DIR}")
+
 CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000").rstrip("/v2").rstrip("/")
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*")
 ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS.split(",") if o.strip()] or ["*"]

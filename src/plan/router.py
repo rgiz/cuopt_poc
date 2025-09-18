@@ -14,6 +14,7 @@ from .models import (
 from .config import load_priority_map, load_sla_windows
 from .candidates import generate_candidates, weekday_from_local
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
+from .cascade_candidates import generate_cascade_candidates
 
 def create_router(
     get_data: Callable[[], Optional[Dict[str, Any]]],
@@ -939,10 +940,25 @@ def create_router(
     def plan_candidates(req: PlanRequest):
         DATA, M, LOC_META = ensure_ready()
         cfg = get_cost_config()
-        weekday, trip_minutes, trip_miles, cands = generate_candidates(req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
+        
+        # NEW: Use cascade-aware candidate generation
+        weekday, trip_minutes, trip_miles, cands = generate_cascade_candidates(
+            req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
+            max_cascade_depth=2, 
+            max_candidates=10
+        )
+        
         return PlanCandidatesResponse(
             weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
         )
+    # @router.post("/candidates", response_model=PlanCandidatesResponse)
+    # def plan_candidates(req: PlanRequest):
+    #     DATA, M, LOC_META = ensure_ready()
+    #     cfg = get_cost_config()
+    #     weekday, trip_minutes, trip_miles, cands = generate_candidates(req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
+    #     return PlanCandidatesResponse(
+    #         weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
+    #     )
 
     @router.post("/solve_cascades", response_model=PlanSolveCascadeResponse)
     def plan_and_solve_cascades(req: PlanSolveCascadeRequest, request: Request):
