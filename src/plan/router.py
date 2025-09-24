@@ -12,7 +12,9 @@ from .models import (
 )
 
 from .config import load_priority_map, load_sla_windows
-from .candidates import generate_candidates, weekday_from_local
+# from .candidates import generate_candidates, weekday_from_local
+from .candidates import weekday_from_local
+from .cascade_candidates import generate_cascade_candidates as generate_candidates
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
 from .cascade_candidates import generate_cascade_candidates
 
