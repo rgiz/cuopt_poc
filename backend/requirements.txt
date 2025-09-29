@@ -16,3 +16,5 @@ python-dateutil
 pytest
 responses
 python-multipart>=0.0.9
+cuopt_mps_parser==25.8.0
+cuopt_sh_client==25.8.0

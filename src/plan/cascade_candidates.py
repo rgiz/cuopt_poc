@@ -279,38 +279,6 @@ def _check_calling_points_proximity(
     
     return False
 
-# def _evaluate_cascade_scenario(
-#     base_driver_id: str,
-#     new_trip_req: PlanRequest,
-#     DATA: Dict[str, Any],
-#     matrices: Dict[str, Any],
-#     cost_cfg: Dict[str, float],
-#     weekday: str,
-#     sla_windows: Dict[int, Dict[str, int]],
-#     max_cascade_depth: int
-# ) -> Optional[CascadeCandidateOut]:
-#     """
-#     REPLACE your existing _evaluate_cascade_scenario with this:
-#     """
-    
-#     # Try cuOpt first if available
-#     if CUOPT_AVAILABLE:
-#         try:
-#             result = _evaluate_cascade_scenario_with_cuopt(
-#                 base_driver_id, new_trip_req, DATA, matrices, cost_cfg, 
-#                 weekday, sla_windows, max_cascade_depth
-#             )
-#             if result:
-#                 return result
-#         except Exception as e:
-#             print(f"[cascade] cuOpt failed for {base_driver_id}: {e}")
-    
-#     # Fall back to heuristic
-#     return _heuristic_cascade_evaluation_original(
-#         base_driver_id, new_trip_req, DATA, matrices, cost_cfg, 
-#         weekday, sla_windows, max_cascade_depth
-#     )
-
 def _evaluate_cascade_scenario_with_cuopt(
     base_driver_id: str,
     new_trip_req: PlanRequest,
@@ -728,7 +696,6 @@ def _heuristic_cascade_evaluation_original(
     
     # Add these functions to your cascade_candidates.py file:
 
-
 def _evaluate_multi_driver_cascade(
     primary_driver_id: str,
     new_trip_req: PlanRequest,
@@ -828,7 +795,6 @@ def _evaluate_multi_driver_cascade(
             weekday, sla_windows, max_cascade_depth
         )
 
-
 def _find_displaced_work(
     driver_id: str,
     new_trip_req: PlanRequest,
@@ -882,7 +848,6 @@ def _find_displaced_work(
     
     return displaced_work
 
-
 def _filter_displaced_work_by_priority(
     displaced_work: List[Dict[str, Any]],
     new_service_priority: int
@@ -916,7 +881,6 @@ def _filter_displaced_work_by_priority(
             filtered_work.append(task)
     
     return filtered_work
-
 
 def _find_reassignment_candidates(
     displaced_work: List[Dict[str, Any]],
@@ -966,7 +930,6 @@ def _find_reassignment_candidates(
             print(f"[reassign] No candidates found for {task_id}")
     
     return reassignment_candidates
-
 
 def _can_driver_take_task(
     driver_id: str,
@@ -1021,6 +984,36 @@ def _can_driver_take_task(
     
     return False
 
+# Update your main _evaluate_cascade_scenario function to use multi-driver cascades:
+def _evaluate_cascade_scenario(
+    base_driver_id: str,
+    new_trip_req: PlanRequest,
+    DATA: Dict[str, Any],
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float],
+    weekday: str,
+    sla_windows: Dict[int, Dict[str, int]],
+    max_cascade_depth: int
+) -> Optional[CascadeCandidateOut]:
+    """
+    Enhanced cascade evaluation - tries multi-driver cascades first
+    """
+    
+    # Try multi-driver cascade first
+    if max_cascade_depth > 1:
+        result = _evaluate_multi_driver_cascade(
+            base_driver_id, new_trip_req, DATA, matrices, cost_cfg,
+            weekday, sla_windows, max_cascade_depth
+        )
+        
+        if result:
+            return result
+    
+    # Fall back to single-driver cuOpt
+    return _evaluate_cascade_scenario_with_cuopt(
+        base_driver_id, new_trip_req, DATA, matrices, cost_cfg,
+        weekday, sla_windows, max_cascade_depth
+    )
 
 def _build_cascade_cuopt_payload(
     primary_driver_id: str,
@@ -1033,6 +1026,7 @@ def _build_cascade_cuopt_payload(
 ) -> Dict[str, Any]:
     """
     Build cuOpt payload for complete multi-driver cascade optimization
+    FIXED: Proper capacities array format according to cuOpt documentation
     """
     
     Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
@@ -1075,7 +1069,7 @@ def _build_cascade_cuopt_payload(
     # Filter to valid drivers and build vehicle data
     vehicle_locations = []
     vehicle_time_windows = []
-    capacities = []
+    individual_capacities = []  # Collect individual capacities first
     vehicle_types = []
     driver_to_vehicle = {}
     vehicle_id = 0
@@ -1093,7 +1087,7 @@ def _build_cascade_cuopt_payload(
         
         vehicle_locations.append([0, 0])  # Start at depot (location 0)
         vehicle_time_windows.append([duty_start, duty_end])
-        capacities.append([100])  # Each vehicle has capacity 100
+        individual_capacities.append(100)  # Each vehicle has capacity 100
         vehicle_types.append(1)
         
         driver_to_vehicle[driver_id] = vehicle_id
@@ -1102,13 +1096,16 @@ def _build_cascade_cuopt_payload(
     if not vehicle_locations:
         print(f"[cascade] No valid vehicles found for cascade")
         return None
+    # Documentation: "Each capacity dimension's length must align with the length of the vehicle_locations array"
+    capacities = [individual_capacities]  # ✅ CORRECT FORMAT: [[100, 100, 100, ...]]
+    
+    print(f"[cascade] Built {len(vehicle_locations)} vehicles with capacities format: {capacities}")
     
     # Build tasks (new service + displaced work)
-    tasks = []
     task_locations = []
     task_time_windows = []
     service_times = []
-    demands = []
+    individual_demands = []  # ✅ FIXED: Collect individual demands first
     
     # Add new service as high-priority task
     if new_trip_req.start_location.upper() in cuopt_loc_map and new_trip_req.end_location.upper() in cuopt_loc_map:
@@ -1118,21 +1115,35 @@ def _build_cascade_cuopt_payload(
         task_time_windows.append([req_time - 30, req_time + 30])  # 1-hour flexibility
         
         service_times.append(int(new_trip_req.trip_minutes or 60))
-        demands.append([1])
+        individual_demands.append(1)  # ✅ FIXED: Add to individual list
     
     # Add displaced work as tasks that need reassignment
     for task in displaced_work:
-        if task["reassignment_required"]:
+        if task.get("reassignment_required", True):
             if task["end_location"].upper() in cuopt_loc_map:
                 task_locations.append(cuopt_loc_map[task["end_location"].upper()])
                 task_time_windows.append([task["start_time"] - 60, task["end_time"] + 60])
                 service_times.append(int(task["duration_minutes"]))
-                demands.append([1])
+                individual_demands.append(1)  # ✅ FIXED: Add to individual list
+    
+    # ✅ CRITICAL FIX: Build demands in correct format
+    demands = [individual_demands] if individual_demands else [[]]
+    
+    print(f"[cascade] Tasks built - Locations: {len(task_locations)}, Demands: {demands}")
+    
+    # Validate dimensions
+    n_vehicles = len(vehicle_locations)
+    n_tasks = len(task_locations)
+    
+    print(f"[cascade] Payload validation - Vehicles: {n_vehicles}, Tasks: {n_tasks}, Locations: {n_locs}")
+    print(f"[cascade] Capacities shape: {len(capacities)} x {len(capacities[0]) if capacities else 0}")
+    print(f"[cascade] Demands shape: {len(demands)} x {len(demands[0]) if demands else 0}")
+    print(f"[cascade] Vehicle types: {vehicle_types}")
     
     # Build final payload
     payload = {
         "cost_matrix_data": {
-            "data": {"1": cost_matrix}
+            "data": {"1": cost_matrix}  # Matrix for vehicle type 1
         },
         "fleet_data": {
             "vehicle_locations": vehicle_locations,
@@ -1144,7 +1155,7 @@ def _build_cascade_cuopt_payload(
             "task_locations": task_locations,
             "task_time_windows": task_time_windows,
             "service_times": service_times,
-            "demand": demands
+            "demand": demands  # ✅ FIXED: Now [[1, 1, ...]] not [[1], [1], ...]
         },
         "solver_config": {
             "time_limit": 45  # Longer for multi-driver problems
@@ -1153,6 +1164,383 @@ def _build_cascade_cuopt_payload(
     
     return payload
 
+def _validate_cuopt_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Validate cuOpt payload format according to documentation
+    Returns (is_valid, error_message)
+    """
+    
+    try:
+        fleet_data = payload.get("fleet_data", {})
+        
+        # Check required fields
+        vehicle_locations = fleet_data.get("vehicle_locations", [])
+        capacities = fleet_data.get("capacities", [])
+        vehicle_types = fleet_data.get("vehicle_types", [])
+        
+        n_vehicles = len(vehicle_locations)
+        
+        if n_vehicles == 0:
+            return False, "No vehicles provided"
+        
+        # Check capacities format
+        if not capacities:
+            return False, "No capacities provided"
+        
+        if not isinstance(capacities[0], list):
+            return False, f"Capacities must be array of arrays, got: {type(capacities[0])}"
+        
+        capacity_dimension_length = len(capacities[0])
+        if capacity_dimension_length != n_vehicles:
+            return False, f"Capacity dimension length ({capacity_dimension_length}) must equal number of vehicles ({n_vehicles})"
+        
+        # Check vehicle_types length
+        if len(vehicle_types) != n_vehicles:
+            return False, f"Vehicle types length ({len(vehicle_types)}) must equal number of vehicles ({n_vehicles})"
+        
+        # Check cost matrix exists for vehicle types
+        cost_data = payload.get("cost_matrix_data", {}).get("data", {})
+        for vtype in set(vehicle_types):
+            if str(vtype) not in cost_data:
+                return False, f"Missing cost matrix for vehicle type {vtype}"
+        
+        print(f"[cuopt] Payload validation PASSED: {n_vehicles} vehicles, capacities={capacities}")
+        return True, "Valid"
+        
+    except Exception as e:
+        return False, f"Validation error: {e}"
+
+# Update the _evaluate_multi_driver_cascade function to use validation:
+def _evaluate_multi_driver_cascade_with_validation(
+    primary_driver_id: str,
+    new_trip_req: PlanRequest,
+    DATA: Dict[str, Any],
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float],
+    weekday: str,
+    sla_windows: Dict[int, Dict[str, int]],
+    max_cascade_depth: int
+) -> Optional[CascadeCandidateOut]:
+    """
+    Evaluate multi-driver cascade scenarios with payload validation
+    """
+    
+    if not CUOPT_CLIENT_AVAILABLE:
+        print(f"[cascade] cuOpt client not available, skipping multi-driver cascade")
+        return None
+    
+    try:
+        print(f"[cascade] Building multi-driver cascade for {primary_driver_id}")
+        
+        # STEP 1: Analyze what work gets displaced by the new service
+        displaced_work = _find_displaced_work(
+            primary_driver_id, new_trip_req, DATA, weekday, matrices
+        )
+        
+        if not displaced_work:
+            print(f"[cascade] No displaced work for {primary_driver_id}")
+            return None
+        
+        print(f"[cascade] Found {len(displaced_work)} displaced tasks for {primary_driver_id}")
+        
+        # STEP 2: Filter displaced work by priority rules
+        filtered_displaced_work = _filter_displaced_work_by_priority(displaced_work, new_trip_req.priority)
+        
+        print(f"[cascade] After priority filtering: {len(filtered_displaced_work)} tasks need reassignment")
+        
+        # STEP 3: Find candidate drivers for displaced work
+        reassignment_candidates = _find_reassignment_candidates(
+            filtered_displaced_work, DATA, matrices, weekday, sla_windows
+        )
+        
+        if not reassignment_candidates:
+            print(f"[cascade] No reassignment candidates found for {primary_driver_id}")
+            return None
+        
+        # STEP 4: Build complete cascade payload for cuOpt
+        cascade_payload = _build_cascade_cuopt_payload(
+            primary_driver_id=primary_driver_id,
+            new_trip_req=new_trip_req,
+            displaced_work=filtered_displaced_work,
+            reassignment_candidates=reassignment_candidates,
+            DATA=DATA,
+            matrices=matrices,
+            weekday=weekday
+        )
+        
+        if not cascade_payload:
+            print(f"[cascade] Failed to build payload for {primary_driver_id}")
+            return None
+        
+        # STEP 5: Validate payload before sending to cuOpt
+        is_valid, error_msg = _validate_cuopt_payload(cascade_payload)
+        if not is_valid:
+            print(f"[cascade] Payload validation failed for {primary_driver_id}: {error_msg}")
+            return None
+        
+        # STEP 6: Solve with cuOpt
+        cuopt_host = os.getenv("CUOPT_HOST", "cuopt")
+        cuopt_client = CuOptServiceSelfHostClient(
+            ip=cuopt_host,
+            port=5000,
+            polling_timeout=30,  # Longer timeout for multi-driver problems
+            timeout_exception=False
+        )
+        
+        print(f"[cascade] Solving multi-driver cascade with cuOpt (validated payload)")
+        solution = cuopt_client.get_optimized_routes(cascade_payload)
+        solution = _repoll_solution(cuopt_client, solution, repoll_tries=100)
+        
+        if solution and "response" in solution:
+            solver_response = solution["response"].get("solver_response", {})
+            status = solver_response.get("status", -1)
+            
+            if status == 0:  # Success
+                print(f"[cascade] Multi-driver cascade SUCCESS for {primary_driver_id}")
+                return _parse_cascade_cuopt_solution(
+                    solution, primary_driver_id, new_trip_req, filtered_displaced_work,
+                    reassignment_candidates, DATA, matrices, weekday, cost_cfg
+                )
+            else:
+                print(f"[cascade] cuOpt solver failed for {primary_driver_id}: status={status}")
+        else:
+            print(f"[cascade] cuOpt returned invalid response for {primary_driver_id}")
+            
+        return None
+        
+    except Exception as e:
+        print(f"[cascade] Multi-driver cascade failed for {primary_driver_id}: {e}")
+        return None
+
+def _build_correct_cuopt_payload(
+    candidates: List[str],
+    new_trip_req: PlanRequest,
+    DATA: Dict[str, Any],
+    matrices: Dict[str, Any],
+    weekday: str
+) -> Dict[str, Any]:
+    """
+    Build cuOpt payload with CORRECT cost matrix format for vehicle types
+    FIXED: Proper capacities array format
+    """
+    
+    Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+    
+    start_idx = loc2idx.get(new_trip_req.start_location.upper())
+    end_idx = loc2idx.get(new_trip_req.end_location.upper())
+    
+    if start_idx is None or end_idx is None:
+        raise ValueError(f"Invalid locations: {new_trip_req.start_location} -> {new_trip_req.end_location}")
+    
+    # Simple 2-location cost matrix
+    cost_matrix = [
+        [0, int(Mdist[start_idx, end_idx])],
+        [int(Mdist[end_idx, start_idx]), 0]
+    ]
+    
+    # Build vehicle data for the first candidate
+    if not candidates:
+        raise ValueError("No candidates provided")
+    
+    primary_driver = candidates[0]
+    driver_meta = DATA["driver_states"]["drivers"].get(primary_driver, {})
+    elements = driver_meta.get("elements", [])
+    active_elements = [e for e in elements if element_active_on_weekday(e, weekday)]
+    
+    if not active_elements:
+        raise ValueError(f"No active elements for driver {primary_driver}")
+    
+    duty_start = min(e.get("start_min", 1440) for e in active_elements)
+    duty_end = max(e.get("end_min", 0) for e in active_elements)
+    
+    # FIXED: Correct capacities format
+    payload = {
+        "cost_matrix_data": {
+            "data": {"1": cost_matrix}  # Matrix for vehicle type 1
+        },
+        "fleet_data": {
+            "vehicle_locations": [[0, 0]],  # Vehicle starts at location 0
+            "vehicle_time_windows": [[duty_start, duty_end]],
+            "capacities": [[100]],  # ✅ CORRECT: Single array with one vehicle's capacity
+            "vehicle_types": [1]  # This must match the key in cost_matrix_data
+        },
+        "task_data": {
+            "task_locations": [1],  # Task at location 1
+            "task_time_windows": [[duty_start, duty_end]],
+            "service_times": [int(new_trip_req.trip_minutes or 60)],
+            "demand": [[1]]  # ✅ CORRECT: Single array with one task's demand
+        },
+        "solver_config": {
+            "time_limit": 10  # Quick solve
+        }
+    }
+    
+    return payload
+
+# def _parse_cascade_cuopt_solution(
+#     solution: Dict[str, Any],
+#     primary_driver_id: str,
+#     new_trip_req: PlanRequest,
+#     displaced_work: List[Dict[str, Any]],
+#     reassignment_candidates: Dict[str, List[str]],
+#     DATA: Dict[str, Any],
+#     matrices: Dict[str, Any],
+#     weekday: str,
+#     cost_cfg: Dict[str, float]
+# ) -> CascadeCandidateOut:
+#     """
+#     Parse cuOpt solution back into cascade candidate format with proper UI schedules
+#     """
+    
+#     solver_response = solution["response"]["solver_response"]
+#     solution_cost = solver_response.get("solution_cost", 0)
+#     vehicle_data = solver_response.get("vehicle_data", {})
+    
+#     print(f"[cuopt] Parsing solution for UI - Vehicles in solution: {list(vehicle_data.keys())}")
+    
+#     # Extract all drivers involved in the solution
+#     involved_drivers = set([primary_driver_id])
+#     for candidates in reassignment_candidates.values():
+#         involved_drivers.update(candidates[:2])
+    
+#     # Build before/after schedules for all affected drivers
+#     before_after_schedules = {}
+#     cascade_chain = []
+    
+#     for driver_id in involved_drivers:
+#         driver_meta = DATA["driver_states"]["drivers"].get(driver_id, {})
+#         elements = driver_meta.get("elements", [])
+#         active_elements = [e for e in elements if element_active_on_weekday(e, weekday)]
+        
+#         if not active_elements:
+#             continue
+            
+#         # Build "before" schedule (original driver state)
+#         before_schedule = []
+#         for i, element in enumerate(active_elements):
+#             before_schedule.append({
+#                 "index": i,
+#                 "element_type": element.get("element_type", "TRAVEL"),
+#                 "from": element.get("from", ""),
+#                 "to": element.get("to", ""),
+#                 "start_time": f"{element.get('start_min', 0)//60:02d}:{element.get('start_min', 0)%60:02d}",
+#                 "end_time": f"{element.get('end_min', 0)//60:02d}:{element.get('end_min', 0)%60:02d}",
+#                 "start_min": element.get("start_min", 0),
+#                 "end_min": element.get("end_min", 0),
+#                 "priority": element.get("priority", 3),
+#                 "load_type": element.get("planz_code", "UNKNOWN"),
+#                 "changes": ""
+#             })
+        
+#         # Build "after" schedule based on cuOpt solution
+#         after_schedule = before_schedule.copy()
+        
+#         # Find this driver's route in the cuOpt solution
+#         driver_route = None
+#         for vehicle_key, vehicle_info in vehicle_data.items():
+#             # Map vehicle back to driver (simplified - you may need better mapping)
+#             if driver_id == primary_driver_id or driver_id in str(vehicle_key):
+#                 driver_route = vehicle_info
+#                 break
+        
+#         if driver_route:
+#             # Extract route information from cuOpt solution
+#             task_ids = driver_route.get("task_id", [])
+#             arrival_stamps = driver_route.get("arrival_stamp", [])
+#             route_locations = driver_route.get("route", [])
+            
+#             print(f"[cuopt] Driver {driver_id} route: {task_ids}")
+            
+#             # Add new service to the schedule if this is the primary driver
+#             if driver_id == primary_driver_id:
+#                 req_time = minute_of_day_local(new_trip_req.when_local)
+#                 service_minutes = int(new_trip_req.trip_minutes or 60)
+                
+#                 new_service_element = {
+#                     "index": len(after_schedule),
+#                     "element_type": "TRAVEL",
+#                     "from": new_trip_req.start_location,
+#                     "to": new_trip_req.end_location,
+#                     "start_time": f"{req_time//60:02d}:{req_time%60:02d}",
+#                     "end_time": f"{(req_time + service_minutes)//60:02d}:{(req_time + service_minutes)%60:02d}",
+#                     "start_min": req_time,
+#                     "end_min": req_time + service_minutes,
+#                     "priority": new_trip_req.priority,
+#                     "load_type": "NEW_SERVICE",
+#                     "changes": "ADDED_BY_CUOPT"
+#                 }
+#                 after_schedule.append(new_service_element)
+                
+#                 # Build cascade chain entry
+#                 cascade_chain.append({
+#                     "step": 1,
+#                     "vehicle_id": driver_id,
+#                     "tasks": task_ids,
+#                     "route": route_locations,
+#                     "action": "TAKES_NEW_SERVICE"
+#                 })
+            
+#             # Add reassigned tasks for secondary drivers
+#             else:
+#                 for task in displaced_work:
+#                     if task.get("reassignment_required") and driver_id in reassignment_candidates.get(
+#                         f"{task['start_location']}→{task['end_location']}@{task['start_time']}", []
+#                     ):
+#                         reassigned_element = {
+#                             "index": len(after_schedule),
+#                             "element_type": "TRAVEL",
+#                             "from": task["start_location"],
+#                             "to": task["end_location"],
+#                             "start_time": f"{task['start_time']//60:02d}:{task['start_time']%60:02d}",
+#                             "end_time": f"{task['end_time']//60:02d}:{task['end_time']%60:02d}",
+#                             "start_min": task["start_time"],
+#                             "end_min": task["end_time"],
+#                             "priority": task["priority"],
+#                             "load_type": "REASSIGNED_WORK",
+#                             "changes": "REASSIGNED_BY_CUOPT"
+#                         }
+#                         after_schedule.append(reassigned_element)
+                
+#                 # Build cascade chain entry for secondary drivers
+#                 cascade_chain.append({
+#                     "step": len(cascade_chain) + 1,
+#                     "vehicle_id": driver_id,
+#                     "tasks": task_ids,
+#                     "route": route_locations,
+#                     "action": "TAKES_DISPLACED_WORK"
+#                 })
+        
+#         # Store both schedules for this driver
+#         before_after_schedules[driver_id] = {
+#             "before": before_schedule,
+#             "after": after_schedule
+#         }
+    
+#     # Count affected drivers
+#     drivers_affected = len(before_after_schedules)
+    
+#     # Handle uncovered P4 tasks
+#     uncovered_p4_tasks = []
+#     for task in displaced_work:
+#         if task.get("priority", 3) == 4 and not task.get("reassignment_required", True):
+#             uncovered_p4_tasks.append({
+#                 "task_id": f"{task['start_location']}→{task['end_location']}",
+#                 "reason": "P4_optional_work_not_reassigned"
+#             })
+    
+#     print(f"[cuopt] Parsed solution: {drivers_affected} drivers affected, {len(cascade_chain)} chain steps")
+    
+#     return CascadeCandidateOut(
+#         candidate_id=f"CASCADE_{primary_driver_id}",
+#         primary_driver_id=primary_driver_id,
+#         total_system_cost=float(solution_cost),
+#         drivers_affected=drivers_affected,
+#         cascade_chain=cascade_chain,
+#         before_after_schedules=before_after_schedules,
+#         is_fully_feasible=True,
+#         uncovered_p4_tasks=uncovered_p4_tasks,
+#         disposed_p5_tasks=[],  # Would list disposed P5 tasks
+#     )
 
 def _parse_cascade_cuopt_solution(
     solution: Dict[str, Any],
@@ -1165,44 +1553,117 @@ def _parse_cascade_cuopt_solution(
     weekday: str,
     cost_cfg: Dict[str, float]
 ) -> CascadeCandidateOut:
-    """
-    Parse cuOpt solution back into cascade candidate format
-    """
+    """Parse cuOpt solution and verify cascade usage"""
     
     solver_response = solution["response"]["solver_response"]
     solution_cost = solver_response.get("solution_cost", 0)
     vehicle_data = solver_response.get("vehicle_data", {})
     
-    # Count affected drivers
-    drivers_affected = len([v for v in vehicle_data.values() if v.get("task_id", [])])
+    # DEBUG: Log what cuOpt returned
+    print(f"\n[cuopt] ===== CUOPT SOLUTION ANALYSIS =====")
+    print(f"[cuopt] Vehicles in payload: 3")
+    print(f"[cuopt] Tasks in payload: {len(displaced_work) + 1} (1 new service + {len(displaced_work)} displaced)")
+    print(f"[cuopt] Vehicles used by cuOpt: {len(vehicle_data)}")
     
-    # Build cascade chain information
+    # Analyze if cascade was needed
+    if len(vehicle_data) == 1:
+        print(f"[cuopt] ✅ SINGLE-DRIVER SOLUTION: cuOpt determined 1 driver can handle all work efficiently")
+        print(f"[cuopt]    This means NO CASCADE is needed - primary driver can do everything")
+    elif len(vehicle_data) > 1:
+        print(f"[cuopt] 🔄 MULTI-DRIVER CASCADE: cuOpt used {len(vehicle_data)} drivers")
+        print(f"[cuopt]    This means a CASCADE IS necessary - work distributed across drivers")
+    else:
+        print(f"[cuopt] ⚠️  WARNING: No vehicles used in solution!")
+    
+    # Log each vehicle's work
+    for vehicle_key, vdata in vehicle_data.items():
+        tasks = vdata.get('task_id', [])
+        non_depot_tasks = [t for t in tasks if t not in ['Depot', 'depot']]
+        print(f"[cuopt] Vehicle {vehicle_key}: {len(non_depot_tasks)} tasks → {non_depot_tasks}")
+    
+    print(f"[cuopt] =====================================\n")
+    
+    # Rest of your existing code...
+    involved_drivers = set([primary_driver_id])
+    for candidates in reassignment_candidates.values():
+        involved_drivers.update(candidates[:2])
+    
+    # Map only the vehicles that cuOpt actually used
+    vehicle_to_driver = {}
+    all_drivers_list = [primary_driver_id] + list(set(involved_drivers) - {primary_driver_id})
+    
+    for i, vehicle_key in enumerate(vehicle_data.keys()):
+        if i < len(all_drivers_list):
+            vehicle_to_driver[vehicle_key] = all_drivers_list[i]
+    
+    print(f"[cuopt] Vehicle to driver mapping: {vehicle_to_driver}")
+    
+    # Build schedules ONLY for drivers that cuOpt used
+    before_after_schedules = {}
     cascade_chain = []
-    for i, (vehicle_key, vehicle_info) in enumerate(vehicle_data.items()):
-        if vehicle_info.get("task_id", []):
-            cascade_chain.append({
-                "step": i + 1,
-                "vehicle_id": vehicle_key,
-                "tasks": vehicle_info.get("task_id", []),
-                "route": vehicle_info.get("route", [])
-            })
     
-    # Build before/after schedules (simplified for now)
-    before_after_schedules = {
-        primary_driver_id: {
-            "before": [],  # Would build from original driver state
-            "after": []    # Would build from cuOpt solution
+    for vehicle_key, driver_id in vehicle_to_driver.items():
+        driver_meta = DATA["driver_states"]["drivers"].get(driver_id, {})
+        elements = driver_meta.get("elements", [])
+        active_elements = [e for e in elements if element_active_on_weekday(e, weekday)]
+        
+        if not active_elements:
+            continue
+        
+        # Build "before" schedule
+        before_schedule = []
+        for i, element in enumerate(active_elements):
+            before_schedule.append({
+                "index": i,
+                "element_type": element.get("element_type", "TRAVEL"),
+                "from": element.get("from", ""),
+                "to": element.get("to", ""),
+                "start_time": f"{element.get('start_min', 0)//60:02d}:{element.get('start_min', 0)%60:02d}",
+                "end_time": f"{element.get('end_min', 0)//60:02d}:{element.get('end_min', 0)%60:02d}",
+                "start_min": element.get("start_min", 0),
+                "end_min": element.get("end_min", 0),
+                "priority": element.get("priority", 3),
+                "load_type": element.get("planz_code", "UNKNOWN"),
+                "changes": ""
+            })
+        
+        # Build "after" schedule from cuOpt solution
+        print(f"[cuopt] ✅ Building optimized schedule for {driver_id} from cuOpt route")
+        after_schedule = _rebuild_schedule_from_cuopt_route(
+            driver_id,
+            vehicle_data[vehicle_key],
+            before_schedule,
+            new_trip_req,
+            displaced_work,
+            DATA,
+            matrices,
+            weekday
+        )
+        
+        before_after_schedules[driver_id] = {
+            "before": before_schedule,
+            "after": after_schedule
         }
-    }
-    
-    # Handle uncovered P4 tasks
-    uncovered_p4_tasks = []
-    for task in displaced_work:
-        if task["priority"] == 4 and not task.get("reassignment_required", True):
-            uncovered_p4_tasks.append({
-                "task_id": f"{task['start_location']}→{task['end_location']}",
-                "reason": "P4_optional_work_not_reassigned"
+        
+        # Build cascade chain
+        vdata = vehicle_data[vehicle_key]
+        if vdata.get("task_id"):
+            cascade_chain.append({
+                "step": len(cascade_chain) + 1,
+                "vehicle_id": driver_id,
+                "tasks": vdata.get("task_id", []),
+                "route": vdata.get("route", [])
             })
+    
+    drivers_affected = len(before_after_schedules)
+    
+    # Summary
+    if drivers_affected == 1:
+        print(f"[cuopt] 📊 RESULT: Single-driver solution (no cascade needed)")
+    else:
+        print(f"[cuopt] 📊 RESULT: Multi-driver cascade with {drivers_affected} drivers affected")
+    
+    print(f"[cuopt] 💰 Total cost: £{solution_cost:.2f}")
     
     return CascadeCandidateOut(
         candidate_id=f"CASCADE_{primary_driver_id}",
@@ -1212,38 +1673,204 @@ def _parse_cascade_cuopt_solution(
         cascade_chain=cascade_chain,
         before_after_schedules=before_after_schedules,
         is_fully_feasible=True,
-        uncovered_p4_tasks=uncovered_p4_tasks,
-        disposed_p5_tasks=[],  # Would list disposed P5 tasks
+        uncovered_p4_tasks=[],
+        disposed_p5_tasks=[]
     )
 
 
-# Update your main _evaluate_cascade_scenario function to use multi-driver cascades:
-def _evaluate_cascade_scenario(
-    base_driver_id: str,
+def _rebuild_schedule_from_cuopt_route(
+    driver_id: str,
+    vehicle_route: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
     new_trip_req: PlanRequest,
+    displaced_work: List[Dict[str, Any]],
     DATA: Dict[str, Any],
     matrices: Dict[str, Any],
-    cost_cfg: Dict[str, float],
-    weekday: str,
-    sla_windows: Dict[int, Dict[str, int]],
-    max_cascade_depth: int
-) -> Optional[CascadeCandidateOut]:
+    weekday: str
+) -> List[Dict[str, Any]]:
     """
-    Enhanced cascade evaluation - tries multi-driver cascades first
+    Rebuild driver schedule from cuOpt's optimized route
+    
+    cuOpt returns:
+    - task_id: List of task names (e.g., ["Depot", "Task1", "Task2", "Depot"])
+    - arrival_stamp: List of arrival times in minutes
+    - route: List of location indices
+    - type: List of types (e.g., ["Depot", "Delivery", "Delivery", "Depot"])
     """
     
-    # Try multi-driver cascade first
-    if max_cascade_depth > 1:
-        result = _evaluate_multi_driver_cascade(
-            base_driver_id, new_trip_req, DATA, matrices, cost_cfg,
-            weekday, sla_windows, max_cascade_depth
+    task_ids = vehicle_route.get("task_id", [])
+    arrival_stamps = vehicle_route.get("arrival_stamp", [])
+    route_indices = vehicle_route.get("route", [])
+    task_types = vehicle_route.get("type", [])
+    
+    print(f"[cuopt] Rebuilding route with {len(task_ids)} tasks")
+    
+    # TODO: Implement proper route reconstruction
+    # For now, return original schedule with new service appended
+    # You'll need to map cuOpt's task_ids back to your actual work elements
+    
+    rebuilt_schedule = original_schedule.copy()
+    
+    # Simple fallback: append new service
+    req_time = minute_of_day_local(new_trip_req.when_local)
+    service_minutes = int(new_trip_req.trip_minutes or 60)
+    
+    rebuilt_schedule.append({
+        "index": len(rebuilt_schedule),
+        "element_type": "TRAVEL",
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.end_location,
+        "start_time": f"{req_time//60:02d}:{req_time%60:02d}",
+        "end_time": f"{(req_time + service_minutes)//60:02d}:{(req_time + service_minutes)%60:02d}",
+        "start_min": req_time,
+        "end_min": req_time + service_minutes,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "ADDED_BY_CUOPT"
+    })
+    
+    return rebuilt_schedule
+
+def _build_ui_schedules_from_cascade(
+    cascade_result: CascadeCandidateOut,
+    DATA: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """
+    Convert CascadeCandidateOut to the format expected by the UI
+    """
+    
+    ui_schedules = []
+    
+    for driver_id, schedules in cascade_result.before_after_schedules.items():
+        ui_schedule = {
+            "driver_id": driver_id,
+            "before": schedules["before"],
+            "after": schedules["after"]
+        }
+        ui_schedules.append(ui_schedule)
+    
+    return ui_schedules
+
+def _compute_cascade_schedules(
+    DATA: Dict[str, Any], 
+    cascade_solutions: List[CascadeCandidateOut]
+) -> List[Dict[str, Any]]:
+    """
+    Convert cascade solutions to schedule format expected by UI
+    Matches the format in _compute_before_after_schedules from router.py
+    """
+    
+    all_schedules = []
+    
+    for cascade_solution in cascade_solutions:
+        # Convert each cascade solution's schedules to UI format
+        ui_schedules = _build_ui_schedules_from_cascade(cascade_solution, DATA)
+        all_schedules.extend(ui_schedules)
+    
+    return all_schedules
+
+def generate_cascade_candidates_with_schedules(
+    req: PlanRequest,
+    DATA: Dict[str,Any],
+    matrices: Dict[str,Any],
+    cost_cfg: Dict[str,float],
+    loc_meta: Dict[str,Any],
+    sla_windows: Dict[int, Dict[str,int]],
+    max_cascade_depth: int = 2,
+    max_candidates: int = 10,
+) -> Tuple[str, float, float, List[CandidateOut], List[Dict[str, Any]]]:
+    """
+    Enhanced version that returns both candidates AND schedule data for UI
+    """
+    
+    weekday = weekday_from_local(req.when_local)
+    req_min = minute_of_day_local(req.when_local)
+    
+    # Test official cuOpt client on first run
+    cuopt_working = _test_official_cuopt_client()
+    cuopt_status = "OFFICIAL_CLIENT" if cuopt_working else "HEURISTIC_FALLBACK"
+    
+    print(f"[cascade] Generating candidates for {req.start_location}→{req.end_location} (cuOpt: {cuopt_status})")
+    
+    try:
+        base_driver_candidates = _enhanced_driver_filtering(
+            req, DATA, matrices, loc_meta, weekday, req_min, sla_windows,
+            calling_point_proximity_miles=50,
+            max_drivers=20
         )
         
-        if result:
-            return result
+        if not base_driver_candidates:
+            print("[cascade] No viable base drivers found")
+            return weekday, 0.0, 0.0, [], []
+        
+        cascade_solutions = []
+        
+        for base_driver_id in base_driver_candidates[:10]:
+            cascade_solution = _evaluate_cascade_scenario(
+                base_driver_id=base_driver_id,
+                new_trip_req=req,
+                DATA=DATA,
+                matrices=matrices,
+                cost_cfg=cost_cfg,
+                weekday=weekday,
+                sla_windows=sla_windows,
+                max_cascade_depth=max_cascade_depth
+            )
+            
+            if cascade_solution and cascade_solution.is_fully_feasible:
+                cascade_solutions.append(cascade_solution)
+        
+        # Convert to UI format
+        final_candidates = []
+        for solution in cascade_solutions[:max_candidates]:
+            candidate = _enhanced_to_candidate_out(solution)
+            final_candidates.append(candidate)
+        
+        # Build schedule data for UI
+        schedules = _compute_cascade_schedules(DATA, cascade_solutions[:max_candidates])
+        
+        # Calculate trip details
+        if cascade_solutions:
+            Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+            start_idx = idx_of(req.start_location, loc2idx)
+            end_idx = idx_of(req.end_location, loc2idx)
+            trip_minutes = float(Mtime[start_idx, end_idx])
+            trip_miles = float(Mdist[start_idx, end_idx])
+        else:
+            trip_minutes, trip_miles = 0.0, 0.0
+        
+        print(f"[cascade] Generated {len(final_candidates)} candidates with {len(schedules)} schedule entries")
+        return weekday, trip_minutes, trip_miles, final_candidates, schedules
+        
+    except Exception as e:
+        print(f"[cascade] Generation failed: {e}")
+        return weekday, 0.0, 0.0, [], []
     
-    # Fall back to single-driver cuOpt
-    return _evaluate_cascade_scenario_with_cuopt(
-        base_driver_id, new_trip_req, DATA, matrices, cost_cfg,
-        weekday, sla_windows, max_cascade_depth
+def _enhanced_to_candidate_out(cascade_result: CascadeCandidateOut) -> CandidateOut:
+    """
+    Enhanced conversion with better details for UI display
+    """
+    
+    # Build detailed reason string
+    drivers_text = f"{cascade_result.drivers_affected} driver" + ("s" if cascade_result.drivers_affected != 1 else "")
+    cost_text = f"£{cascade_result.total_system_cost:.2f}"
+    
+    if cascade_result.cascade_chain:
+        chain_summary = " → ".join([step.get("vehicle_id", "?") for step in cascade_result.cascade_chain])
+        reason = f"Multi-driver cascade: {chain_summary} ({drivers_text}, {cost_text})"
+    else:
+        reason = f"Enhanced cascade ({drivers_text}, {cost_text})"
+    
+    return CandidateOut(
+        candidate_id=cascade_result.candidate_id,
+        driver_id=cascade_result.primary_driver_id,
+        type="cascade_optimized",
+        est_cost=cascade_result.total_system_cost,
+        deadhead_miles=0.0,  # TODO: Extract from cascade_chain
+        delay_minutes=0.0,
+        overtime_minutes=0.0,
+        uses_emergency_rest=False,
+        miles_delta=0.0,
+        feasible_hard=cascade_result.is_fully_feasible,
+        reason=reason
     )

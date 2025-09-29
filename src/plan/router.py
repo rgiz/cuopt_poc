@@ -17,6 +17,14 @@ from .candidates import weekday_from_local
 from .cascade_candidates import generate_cascade_candidates as generate_candidates
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
 from .cascade_candidates import generate_cascade_candidates
+from .cascade_candidates import (
+    generate_cascade_candidates,                 # Existing
+    generate_cascade_candidates_with_schedules,  # NEW: Enhanced version
+    _compute_cascade_schedules,                  # NEW: For schedule processing  
+    _build_ui_schedules_from_cascade,           # NEW: UI format conversion
+    _enhanced_to_candidate_out,                 # NEW: Enhanced candidate details
+    CascadeCandidateOut                         # NEW: Data class
+)
 
 def create_router(
     get_data: Callable[[], Optional[Dict[str, Any]]],
@@ -936,7 +944,8 @@ def create_router(
             }
             after_schedule.append(fallback_element)
             print(f"⚠️ Fallback append: {from_loc} → {to_loc}")
-    # ------------------- Endpoints -------------------
+    
+# ------------------- Endpoints -------------------
 
     @router.post("/candidates", response_model=PlanCandidatesResponse)
     def plan_candidates(req: PlanRequest):
@@ -953,149 +962,85 @@ def create_router(
         return PlanCandidatesResponse(
             weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
         )
-    # @router.post("/candidates", response_model=PlanCandidatesResponse)
-    # def plan_candidates(req: PlanRequest):
-    #     DATA, M, LOC_META = ensure_ready()
-    #     cfg = get_cost_config()
-    #     weekday, trip_minutes, trip_miles, cands = generate_candidates(req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
-    #     return PlanCandidatesResponse(
-    #         weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
-    #     )
 
     @router.post("/solve_cascades", response_model=PlanSolveCascadeResponse)
-    def plan_and_solve_cascades(req: PlanSolveCascadeRequest, request: Request):
+    def plan_and_solve_cascades_enhanced(req: PlanSolveCascadeRequest, request: Request):
+        """Enhanced cascade solving with proper UI schedule output"""
+        
         DATA, M, LOC_META = ensure_ready()
         cfg = get_cost_config()
-
-        deadhead_cpm = cfg.get("deadhead_cost_per_mile", cfg.get("deadhead_cost", 1.0))
-        overtime_cpm = cfg.get("overtime_cost_per_minute", cfg.get("overtime_cost", 1.0))
-        admin_cost = cfg.get("reassignment_admin_cost", 10.0)
-        out_per_mile = cfg.get("outsourcing_per_mile", cfg.get("outsourcing_cost_per_mile", 2.0))
-
-        i = M["loc2idx"][req.start_location.upper()]
-        j = M["loc2idx"][req.end_location.upper()]
-        trip_minutes = float(req.trip_minutes) if req.trip_minutes is not None else float(M["time"][i, j])
-        trip_miles = float(req.trip_miles) if req.trip_miles is not None else float(M["dist"][i, j])
-
-        root_trip = {
-            "id": f"NEW:{req.start_location}->{req.end_location}@{req.when_local}",
-            "start_location": req.start_location,
-            "end_location": req.end_location,
-            "duration_minutes": trip_minutes,
-            "trip_miles": trip_miles,
-        }
-
-        cascades = []
-        all_assignments = []
-        total_obj = 0.0
-        total_candidates_seen = 0
-        affected_drivers: set[str] = set()
-        visited: set[tuple[str, int]] = set()
-        queue: List[tuple[Dict[str, Any], int, int]] = [(root_trip, req.priority, 0)]
-
-        while queue:
-            trip, prio, depth = queue.pop(0)
-            if len(affected_drivers) >= req.max_drivers_affected:
-                break
-
-            cand_req = PlanRequest(
-                start_location=root_trip["start_location"],
-                end_location=root_trip["end_location"],
-                mode=req.mode,
-                when_local=req.when_local,
-                priority=req.priority,
-                top_n=50,
-                trip_minutes=root_trip["duration_minutes"],
-                trip_miles=root_trip["trip_miles"],
+        
+        # Use enhanced version that returns schedules
+        weekday, trip_minutes, trip_miles, candidates, schedules = generate_cascade_candidates_with_schedules(
+            req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
+            max_cascade_depth=req.max_cascades,
+            max_candidates=req.max_cascades
+        )
+        
+        if not candidates:
+            return PlanSolveCascadeResponse(
+                weekday=weekday,
+                trip_minutes=trip_minutes,
+                trip_miles=trip_miles,
+                objective_value=0.0,
+                assignments=[],
+                details={"backend": "cascade-cuopt", "error": "no_candidates"},
+                candidates_considered=0,
+                cascades=[],
+                schedules=[]
             )
-            wk, tmn, tmi, cands = generate_candidates(cand_req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 50.0)
-            total_candidates_seen += len(cands)
-    
-            chosen = None
-            if req.preferred_candidate_id and req.preferred_driver_id:
-                # Find the specific candidate that matches the UI selection
-                for candidate in cands:
-                    if (candidate.candidate_id == req.preferred_candidate_id and 
-                        candidate.driver_id == req.preferred_driver_id):
-                        chosen = candidate
-                        break
-                
-                # If we couldn't find the exact match, log it and fall back to first candidate
-                if chosen is None:
-                    print(f"WARNING: Could not find preferred candidate {req.preferred_candidate_id} for driver {req.preferred_driver_id}")
-                    chosen = cands[0] if cands else None
-            else:
-                # Original logic: use first candidate
-                chosen = cands[0] if cands else None
-
-            if chosen is None:
-                base = float(cfg.get("outsourcing_base_cost", 200.0))
-                cost = base + trip["trip_miles"] * out_per_mile
-                all_assignments.append(AssignmentOut(
-                    trip_id=trip["id"], type="outsourced", driver_id=None, candidate_id="OUTSOURCE",
-                    cost=cost,
-                    cost_breakdown={
-                        "outsourcing_base": base,
-                        "outsourcing_miles": trip["trip_miles"] * out_per_mile
-                    },
-                    miles_delta=trip["trip_miles"]
-                ))
-                total_obj += cost
-                continue
-
-            affected_drivers.add(chosen.driver_id)
-            bd = {"admin": admin_cost}
-            if chosen.deadhead_miles:
-                bd["deadhead"] = chosen.deadhead_miles * deadhead_cpm
-            if chosen.overtime_minutes:
-                bd["overtime"] = chosen.overtime_minutes * overtime_cpm
-            cost = sum(bd.values())
-            all_assignments.append(AssignmentOut(
-                trip_id=trip["id"], type="reassigned", driver_id=chosen.driver_id,
-                candidate_id=chosen.candidate_id, delay_minutes=chosen.delay_minutes,
-                deadhead_miles=chosen.deadhead_miles, overtime_minutes=chosen.overtime_minutes,
-                miles_delta=chosen.miles_delta, cost=cost, cost_breakdown=bd
-            ))
-            total_obj += cost
-
-            if depth < req.max_cascades and "swap_leg@" in chosen.candidate_id:
-                ds = DATA["driver_states"]
-                drivers = ds["drivers"] if "drivers" in ds else ds
-                m = drivers.get(chosen.driver_id, {})
-                leg = _find_leg_by_candidate_id(m, chosen.candidate_id)
-                if leg:
-                    leg_pri = int(leg.get("priority", 3))
-                    if leg_pri >= prio:
-                        displaced_trip = _build_trip_from_leg(leg, M)
-                        key = (chosen.driver_id, int(leg.get("start_min", -1)))
-                        if key not in visited:
-                            visited.add(key)
-                            cascades.append({
-                                "depth": depth + 1,
-                                "displaced_by": chosen.candidate_id,
-                                "driver_id": chosen.driver_id,
-                                "from": displaced_trip["start_location"],
-                                "to": displaced_trip["end_location"],
-                                "priority": leg_pri
-                            })
-                            queue.append((displaced_trip, leg_pri, depth + 1))
-
-        schedules = _compute_before_after_schedules(DATA, all_assignments, cascades)
-
+        
+        # Build trip_id from request
+        trip_id = f"NEW:{req.start_location}->{req.end_location}@{req.when_local}"
+        
+        # Build assignments from candidates
+        assignments = []
+        total_cost = 0.0
+        
+        for candidate in candidates:
+            # ✅ FIXED: Include required trip_id and type fields
+            assignment = AssignmentOut(
+                trip_id=trip_id,                    # ✅ REQUIRED: Trip identifier
+                type="reassigned",                  # ✅ REQUIRED: Assignment type
+                driver_id=candidate.driver_id,
+                candidate_id=candidate.candidate_id,
+                cost=candidate.est_cost,
+                deadhead_miles=candidate.deadhead_miles,
+                overtime_minutes=candidate.overtime_minutes,
+                delay_minutes=candidate.delay_minutes,
+                miles_delta=candidate.miles_delta,
+                uses_emergency_rest=candidate.uses_emergency_rest
+            )
+            assignments.append(assignment)
+            total_cost += candidate.est_cost
+        
+        # Build cascade information
+        cascades = []
+        for i, candidate in enumerate(candidates):
+            cascades.append({
+                "depth": 1,
+                "displaced_by": "NEW_SERVICE",
+                "driver_id": candidate.driver_id,
+                "from": req.start_location,
+                "to": req.end_location,
+                "priority": req.priority,
+                "reason": candidate.reason or "Enhanced cascade"
+            })
+        
         return PlanSolveCascadeResponse(
-            weekday=weekday_from_local(req.when_local),
+            weekday=weekday,
             trip_minutes=trip_minutes,
             trip_miles=trip_miles,
-            objective_value=total_obj,
-            assignments=all_assignments,
+            objective_value=total_cost,
+            assignments=assignments,
             details={
-                "backend": "cascade-greedy",
+                "backend": "cascade-cuopt-enhanced",
                 "max_cascades": req.max_cascades,
-                "drivers_touched": len(affected_drivers)
+                "drivers_touched": len(set(a.driver_id for a in assignments))
             },
-            candidates_considered=total_candidates_seen,
+            candidates_considered=len(candidates),
             cascades=cascades,
-            schedules=schedules,  # ADD THIS LINE
+            schedules=schedules  # ✅ CRITICAL: Pass schedules to UI
         )
 
     @router.post("/solve_multi", response_model=PlanSolveMultiResponse)
