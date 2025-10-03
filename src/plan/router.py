@@ -949,28 +949,39 @@ def create_router(
 
     @router.post("/candidates", response_model=PlanCandidatesResponse)
     def plan_candidates(req: PlanRequest):
+        """
+        UPDATED: Now returns schedule data for UI visualization
+        """
         DATA, M, LOC_META = ensure_ready()
         cfg = get_cost_config()
         
-        # NEW: Use cascade-aware candidate generation
-        weekday, trip_minutes, trip_miles, cands = generate_cascade_candidates(
+        # Use enhanced version that returns schedules
+        weekday, trip_minutes, trip_miles, cands, schedules = generate_cascade_candidates_with_schedules(
             req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
             max_cascade_depth=2, 
             max_candidates=10
         )
         
+        # IMPORTANT: PlanCandidatesResponse needs to be updated to include schedules
+        # See Fix 2 below for the model update
         return PlanCandidatesResponse(
-            weekday=weekday, trip_minutes=trip_minutes, trip_miles=trip_miles, candidates=cands
+            weekday=weekday, 
+            trip_minutes=trip_minutes, 
+            trip_miles=trip_miles, 
+            candidates=cands,
+            schedules=schedules  # NEW: Add schedule data
         )
 
     @router.post("/solve_cascades", response_model=PlanSolveCascadeResponse)
     def plan_and_solve_cascades_enhanced(req: PlanSolveCascadeRequest, request: Request):
-        """Enhanced cascade solving with proper UI schedule output"""
+        """
+        Enhanced cascade solving with proper UI schedule output
+        """
         
         DATA, M, LOC_META = ensure_ready()
         cfg = get_cost_config()
         
-        # Use enhanced version that returns schedules
+        # ✅ Already using enhanced version - good!
         weekday, trip_minutes, trip_miles, candidates, schedules = generate_cascade_candidates_with_schedules(
             req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
             max_cascade_depth=req.max_cascades,
@@ -987,21 +998,20 @@ def create_router(
                 details={"backend": "cascade-cuopt", "error": "no_candidates"},
                 candidates_considered=0,
                 cascades=[],
-                schedules=[]
+                schedules=[]  # Return empty schedules
             )
         
         # Build trip_id from request
-        trip_id = f"NEW:{req.start_location}->{req.end_location}@{req.when_local}"
+        trip_id = f"NEW-{req.start_location}→{req.end_location}@{req.when_local}"
         
         # Build assignments from candidates
         assignments = []
         total_cost = 0.0
         
         for candidate in candidates:
-            # ✅ FIXED: Include required trip_id and type fields
             assignment = AssignmentOut(
-                trip_id=trip_id,                    # ✅ REQUIRED: Trip identifier
-                type="reassigned",                  # ✅ REQUIRED: Assignment type
+                trip_id=trip_id,
+                type="reassigned",
                 driver_id=candidate.driver_id,
                 candidate_id=candidate.candidate_id,
                 cost=candidate.est_cost,
@@ -1040,8 +1050,88 @@ def create_router(
             },
             candidates_considered=len(candidates),
             cascades=cascades,
-            schedules=schedules  # ✅ CRITICAL: Pass schedules to UI
+            schedules=schedules  # ✅ Schedules already being returned
         )
+
+    # @router.post("/solve_cascades", response_model=PlanSolveCascadeResponse)
+    # def plan_and_solve_cascades_enhanced(req: PlanSolveCascadeRequest, request: Request):
+    #     """Enhanced cascade solving with proper UI schedule output"""
+        
+    #     DATA, M, LOC_META = ensure_ready()
+    #     cfg = get_cost_config()
+        
+    #     # Use enhanced version that returns schedules
+    #     weekday, trip_minutes, trip_miles, candidates, schedules = generate_cascade_candidates_with_schedules(
+    #         req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
+    #         max_cascade_depth=req.max_cascades,
+    #         max_candidates=req.max_cascades
+    #     )
+        
+    #     if not candidates:
+    #         return PlanSolveCascadeResponse(
+    #             weekday=weekday,
+    #             trip_minutes=trip_minutes,
+    #             trip_miles=trip_miles,
+    #             objective_value=0.0,
+    #             assignments=[],
+    #             details={"backend": "cascade-cuopt", "error": "no_candidates"},
+    #             candidates_considered=0,
+    #             cascades=[],
+    #             schedules=[]
+    #         )
+        
+    #     # Build trip_id from request
+    #     trip_id = f"NEW:{req.start_location}->{req.end_location}@{req.when_local}"
+        
+    #     # Build assignments from candidates
+    #     assignments = []
+    #     total_cost = 0.0
+        
+    #     for candidate in candidates:
+    #         # ✅ FIXED: Include required trip_id and type fields
+    #         assignment = AssignmentOut(
+    #             trip_id=trip_id,                    # ✅ REQUIRED: Trip identifier
+    #             type="reassigned",                  # ✅ REQUIRED: Assignment type
+    #             driver_id=candidate.driver_id,
+    #             candidate_id=candidate.candidate_id,
+    #             cost=candidate.est_cost,
+    #             deadhead_miles=candidate.deadhead_miles,
+    #             overtime_minutes=candidate.overtime_minutes,
+    #             delay_minutes=candidate.delay_minutes,
+    #             miles_delta=candidate.miles_delta,
+    #             uses_emergency_rest=candidate.uses_emergency_rest
+    #         )
+    #         assignments.append(assignment)
+    #         total_cost += candidate.est_cost
+        
+    #     # Build cascade information
+    #     cascades = []
+    #     for i, candidate in enumerate(candidates):
+    #         cascades.append({
+    #             "depth": 1,
+    #             "displaced_by": "NEW_SERVICE",
+    #             "driver_id": candidate.driver_id,
+    #             "from": req.start_location,
+    #             "to": req.end_location,
+    #             "priority": req.priority,
+    #             "reason": candidate.reason or "Enhanced cascade"
+    #         })
+        
+    #     return PlanSolveCascadeResponse(
+    #         weekday=weekday,
+    #         trip_minutes=trip_minutes,
+    #         trip_miles=trip_miles,
+    #         objective_value=total_cost,
+    #         assignments=assignments,
+    #         details={
+    #             "backend": "cascade-cuopt-enhanced",
+    #             "max_cascades": req.max_cascades,
+    #             "drivers_touched": len(set(a.driver_id for a in assignments))
+    #         },
+    #         candidates_considered=len(candidates),
+    #         cascades=cascades,
+    #         schedules=schedules  # ✅ CRITICAL: Pass schedules to UI
+    #     )
 
     @router.post("/solve_multi", response_model=PlanSolveMultiResponse)
     def plan_solve_multi(req: PlanSolveMultiRequest, request: Request):

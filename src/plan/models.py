@@ -77,10 +77,11 @@ class CandidateOut(BaseModel):
 
 
 class PlanCandidatesResponse(BaseModel):
-    weekday: str                 # keep as str for consistency with backend helpers
+    weekday: str
     trip_minutes: float
     trip_miles: float
     candidates: List[CandidateOut]
+    schedules: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AssignmentOut(BaseModel):

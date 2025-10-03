@@ -1377,171 +1377,6 @@ def _build_correct_cuopt_payload(
     
     return payload
 
-# def _parse_cascade_cuopt_solution(
-#     solution: Dict[str, Any],
-#     primary_driver_id: str,
-#     new_trip_req: PlanRequest,
-#     displaced_work: List[Dict[str, Any]],
-#     reassignment_candidates: Dict[str, List[str]],
-#     DATA: Dict[str, Any],
-#     matrices: Dict[str, Any],
-#     weekday: str,
-#     cost_cfg: Dict[str, float]
-# ) -> CascadeCandidateOut:
-#     """
-#     Parse cuOpt solution back into cascade candidate format with proper UI schedules
-#     """
-    
-#     solver_response = solution["response"]["solver_response"]
-#     solution_cost = solver_response.get("solution_cost", 0)
-#     vehicle_data = solver_response.get("vehicle_data", {})
-    
-#     print(f"[cuopt] Parsing solution for UI - Vehicles in solution: {list(vehicle_data.keys())}")
-    
-#     # Extract all drivers involved in the solution
-#     involved_drivers = set([primary_driver_id])
-#     for candidates in reassignment_candidates.values():
-#         involved_drivers.update(candidates[:2])
-    
-#     # Build before/after schedules for all affected drivers
-#     before_after_schedules = {}
-#     cascade_chain = []
-    
-#     for driver_id in involved_drivers:
-#         driver_meta = DATA["driver_states"]["drivers"].get(driver_id, {})
-#         elements = driver_meta.get("elements", [])
-#         active_elements = [e for e in elements if element_active_on_weekday(e, weekday)]
-        
-#         if not active_elements:
-#             continue
-            
-#         # Build "before" schedule (original driver state)
-#         before_schedule = []
-#         for i, element in enumerate(active_elements):
-#             before_schedule.append({
-#                 "index": i,
-#                 "element_type": element.get("element_type", "TRAVEL"),
-#                 "from": element.get("from", ""),
-#                 "to": element.get("to", ""),
-#                 "start_time": f"{element.get('start_min', 0)//60:02d}:{element.get('start_min', 0)%60:02d}",
-#                 "end_time": f"{element.get('end_min', 0)//60:02d}:{element.get('end_min', 0)%60:02d}",
-#                 "start_min": element.get("start_min", 0),
-#                 "end_min": element.get("end_min", 0),
-#                 "priority": element.get("priority", 3),
-#                 "load_type": element.get("planz_code", "UNKNOWN"),
-#                 "changes": ""
-#             })
-        
-#         # Build "after" schedule based on cuOpt solution
-#         after_schedule = before_schedule.copy()
-        
-#         # Find this driver's route in the cuOpt solution
-#         driver_route = None
-#         for vehicle_key, vehicle_info in vehicle_data.items():
-#             # Map vehicle back to driver (simplified - you may need better mapping)
-#             if driver_id == primary_driver_id or driver_id in str(vehicle_key):
-#                 driver_route = vehicle_info
-#                 break
-        
-#         if driver_route:
-#             # Extract route information from cuOpt solution
-#             task_ids = driver_route.get("task_id", [])
-#             arrival_stamps = driver_route.get("arrival_stamp", [])
-#             route_locations = driver_route.get("route", [])
-            
-#             print(f"[cuopt] Driver {driver_id} route: {task_ids}")
-            
-#             # Add new service to the schedule if this is the primary driver
-#             if driver_id == primary_driver_id:
-#                 req_time = minute_of_day_local(new_trip_req.when_local)
-#                 service_minutes = int(new_trip_req.trip_minutes or 60)
-                
-#                 new_service_element = {
-#                     "index": len(after_schedule),
-#                     "element_type": "TRAVEL",
-#                     "from": new_trip_req.start_location,
-#                     "to": new_trip_req.end_location,
-#                     "start_time": f"{req_time//60:02d}:{req_time%60:02d}",
-#                     "end_time": f"{(req_time + service_minutes)//60:02d}:{(req_time + service_minutes)%60:02d}",
-#                     "start_min": req_time,
-#                     "end_min": req_time + service_minutes,
-#                     "priority": new_trip_req.priority,
-#                     "load_type": "NEW_SERVICE",
-#                     "changes": "ADDED_BY_CUOPT"
-#                 }
-#                 after_schedule.append(new_service_element)
-                
-#                 # Build cascade chain entry
-#                 cascade_chain.append({
-#                     "step": 1,
-#                     "vehicle_id": driver_id,
-#                     "tasks": task_ids,
-#                     "route": route_locations,
-#                     "action": "TAKES_NEW_SERVICE"
-#                 })
-            
-#             # Add reassigned tasks for secondary drivers
-#             else:
-#                 for task in displaced_work:
-#                     if task.get("reassignment_required") and driver_id in reassignment_candidates.get(
-#                         f"{task['start_location']}→{task['end_location']}@{task['start_time']}", []
-#                     ):
-#                         reassigned_element = {
-#                             "index": len(after_schedule),
-#                             "element_type": "TRAVEL",
-#                             "from": task["start_location"],
-#                             "to": task["end_location"],
-#                             "start_time": f"{task['start_time']//60:02d}:{task['start_time']%60:02d}",
-#                             "end_time": f"{task['end_time']//60:02d}:{task['end_time']%60:02d}",
-#                             "start_min": task["start_time"],
-#                             "end_min": task["end_time"],
-#                             "priority": task["priority"],
-#                             "load_type": "REASSIGNED_WORK",
-#                             "changes": "REASSIGNED_BY_CUOPT"
-#                         }
-#                         after_schedule.append(reassigned_element)
-                
-#                 # Build cascade chain entry for secondary drivers
-#                 cascade_chain.append({
-#                     "step": len(cascade_chain) + 1,
-#                     "vehicle_id": driver_id,
-#                     "tasks": task_ids,
-#                     "route": route_locations,
-#                     "action": "TAKES_DISPLACED_WORK"
-#                 })
-        
-#         # Store both schedules for this driver
-#         before_after_schedules[driver_id] = {
-#             "before": before_schedule,
-#             "after": after_schedule
-#         }
-    
-#     # Count affected drivers
-#     drivers_affected = len(before_after_schedules)
-    
-#     # Handle uncovered P4 tasks
-#     uncovered_p4_tasks = []
-#     for task in displaced_work:
-#         if task.get("priority", 3) == 4 and not task.get("reassignment_required", True):
-#             uncovered_p4_tasks.append({
-#                 "task_id": f"{task['start_location']}→{task['end_location']}",
-#                 "reason": "P4_optional_work_not_reassigned"
-#             })
-    
-#     print(f"[cuopt] Parsed solution: {drivers_affected} drivers affected, {len(cascade_chain)} chain steps")
-    
-#     return CascadeCandidateOut(
-#         candidate_id=f"CASCADE_{primary_driver_id}",
-#         primary_driver_id=primary_driver_id,
-#         total_system_cost=float(solution_cost),
-#         drivers_affected=drivers_affected,
-#         cascade_chain=cascade_chain,
-#         before_after_schedules=before_after_schedules,
-#         is_fully_feasible=True,
-#         uncovered_p4_tasks=uncovered_p4_tasks,
-#         disposed_p5_tasks=[],  # Would list disposed P5 tasks
-#     )
-
 def _parse_cascade_cuopt_solution(
     solution: Dict[str, Any],
     primary_driver_id: str,
@@ -1553,7 +1388,9 @@ def _parse_cascade_cuopt_solution(
     weekday: str,
     cost_cfg: Dict[str, float]
 ) -> CascadeCandidateOut:
-    """Parse cuOpt solution and verify cascade usage"""
+    """
+    Parse cuOpt solution and build complete cascade result with schedules
+    """
     
     solver_response = solution["response"]["solver_response"]
     solution_cost = solver_response.get("solution_cost", 0)
@@ -1575,34 +1412,47 @@ def _parse_cascade_cuopt_solution(
     else:
         print(f"[cuopt] ⚠️  WARNING: No vehicles used in solution!")
     
-    # Log each vehicle's work
-    for vehicle_key, vdata in vehicle_data.items():
-        tasks = vdata.get('task_id', [])
-        non_depot_tasks = [t for t in tasks if t not in ['Depot', 'depot']]
-        print(f"[cuopt] Vehicle {vehicle_key}: {len(non_depot_tasks)} tasks → {non_depot_tasks}")
+    # Log task assignments
+    for vehicle_key in vehicle_data.keys():
+        vdata = vehicle_data[vehicle_key]
+        task_ids = vdata.get("task_id", [])
+        print(f"[cuopt] Vehicle {vehicle_key}: {len(task_ids)} tasks → {task_ids}")
     
     print(f"[cuopt] =====================================\n")
     
-    # Rest of your existing code...
-    involved_drivers = set([primary_driver_id])
-    for candidates in reassignment_candidates.values():
-        involved_drivers.update(candidates[:2])
-    
-    # Map only the vehicles that cuOpt actually used
+    # Build driver mapping
     vehicle_to_driver = {}
-    all_drivers_list = [primary_driver_id] + list(set(involved_drivers) - {primary_driver_id})
+    vehicle_to_driver["0"] = primary_driver_id
     
-    for i, vehicle_key in enumerate(vehicle_data.keys()):
-        if i < len(all_drivers_list):
-            vehicle_to_driver[vehicle_key] = all_drivers_list[i]
+    # Map other vehicles to candidate drivers
+    candidate_list = []
+    for candidates in reassignment_candidates.values():
+        candidate_list.extend(candidates[:2])
+    
+    # Remove duplicates while preserving order
+    unique_candidates = []
+    seen = {primary_driver_id}
+    for cand in candidate_list:
+        if cand not in seen:
+            unique_candidates.append(cand)
+            seen.add(cand)
+    
+    for i, cand_driver in enumerate(unique_candidates, start=1):
+        vehicle_to_driver[str(i)] = cand_driver
     
     print(f"[cuopt] Vehicle to driver mapping: {vehicle_to_driver}")
     
-    # Build schedules ONLY for drivers that cuOpt used
+    # Build before/after schedules for affected drivers
     before_after_schedules = {}
     cascade_chain = []
     
-    for vehicle_key, driver_id in vehicle_to_driver.items():
+    for vehicle_key in vehicle_data.keys():
+        driver_id = vehicle_to_driver.get(vehicle_key)
+        if not driver_id:
+            print(f"[cuopt] Warning: No driver mapping for vehicle {vehicle_key}")
+            continue
+        
+        # Get driver's original schedule
         driver_meta = DATA["driver_states"]["drivers"].get(driver_id, {})
         elements = driver_meta.get("elements", [])
         active_elements = [e for e in elements if element_active_on_weekday(e, weekday)]
@@ -1677,7 +1527,6 @@ def _parse_cascade_cuopt_solution(
         disposed_p5_tasks=[]
     )
 
-
 def _rebuild_schedule_from_cuopt_route(
     driver_id: str,
     vehicle_route: Dict[str, Any],
@@ -1689,47 +1538,168 @@ def _rebuild_schedule_from_cuopt_route(
     weekday: str
 ) -> List[Dict[str, Any]]:
     """
-    Rebuild driver schedule from cuOpt's optimized route
+    Rebuild driver schedule from cuOpt's optimized route.
     
     cuOpt returns:
-    - task_id: List of task names (e.g., ["Depot", "Task1", "Task2", "Depot"])
-    - arrival_stamp: List of arrival times in minutes
-    - route: List of location indices
-    - type: List of types (e.g., ["Depot", "Delivery", "Delivery", "Depot"])
+    - task_id: List of task identifiers (e.g., ["0", "1", "2"] where indices map to tasks)
+    - arrival_stamp: List of arrival times in minutes from start of day
+    - route: List of location indices in the cuOpt problem
+    - type: List of task types
+    
+    We need to:
+    1. Map cuOpt's task IDs back to our actual work elements
+    2. Reconstruct the schedule in the order cuOpt determined
+    3. Use cuOpt's timing information where available
     """
     
     task_ids = vehicle_route.get("task_id", [])
     arrival_stamps = vehicle_route.get("arrival_stamp", [])
     route_indices = vehicle_route.get("route", [])
-    task_types = vehicle_route.get("type", [])
     
     print(f"[cuopt] Rebuilding route with {len(task_ids)} tasks")
+    print(f"[cuopt] Task order from cuOpt: {task_ids}")
+    print(f"[cuopt] Arrival times: {arrival_stamps}")
     
-    # TODO: Implement proper route reconstruction
-    # For now, return original schedule with new service appended
-    # You'll need to map cuOpt's task_ids back to your actual work elements
+    # Build task mapping: task_id -> actual work element
+    # Task IDs from cuOpt are string indices like "0", "1", "2"
+    # These map to: [0=new_service, 1=displaced_task_1, 2=displaced_task_2, ...]
+    task_map = {}
     
-    rebuilt_schedule = original_schedule.copy()
-    
-    # Simple fallback: append new service
-    req_time = minute_of_day_local(new_trip_req.when_local)
-    service_minutes = int(new_trip_req.trip_minutes or 60)
-    
-    rebuilt_schedule.append({
-        "index": len(rebuilt_schedule),
-        "element_type": "TRAVEL",
+    # Task 0 is always the new service request
+    task_map["0"] = {
+        "type": "NEW_SERVICE",
         "from": new_trip_req.start_location,
         "to": new_trip_req.end_location,
-        "start_time": f"{req_time//60:02d}:{req_time%60:02d}",
-        "end_time": f"{(req_time + service_minutes)//60:02d}:{(req_time + service_minutes)%60:02d}",
-        "start_min": req_time,
-        "end_min": req_time + service_minutes,
         "priority": new_trip_req.priority,
-        "load_type": "NEW_SERVICE",
-        "changes": "ADDED_BY_CUOPT"
-    })
+        "duration": int(new_trip_req.trip_minutes or 60),
+        "load_type": "NEW_SERVICE"
+    }
     
-    return rebuilt_schedule
+    # Tasks 1+ are displaced work items
+    for i, displaced_task in enumerate(displaced_work, start=1):
+        task_id_str = str(i)
+        element = displaced_task.get("element", {})
+        task_map[task_id_str] = {
+            "type": "DISPLACED_WORK",
+            "from": element.get("from", ""),
+            "to": element.get("to", ""),
+            "priority": element.get("priority", 3),
+            "duration": element.get("end_min", 0) - element.get("start_min", 0),
+            "load_type": element.get("planz_code", "UNKNOWN"),
+            "original_start": element.get("start_min", 0),
+            "original_end": element.get("end_min", 0)
+        }
+    
+    # Start with non-displaced elements from original schedule
+    # We need to keep all the fixed elements (START FACILITY, MEAL RELIEF, END FACILITY, etc.)
+    rebuilt_schedule = []
+    
+    # Track which original elements are being displaced
+    displaced_element_indices = set()
+    for displaced_task in displaced_work:
+        original_element = displaced_task.get("element", {})
+        # Find this element in the original schedule
+        for idx, orig_elem in enumerate(original_schedule):
+            if (orig_elem.get("from") == original_element.get("from") and 
+                orig_elem.get("to") == original_element.get("to") and
+                orig_elem.get("start_min") == original_element.get("start_min")):
+                displaced_element_indices.add(idx)
+                break
+    
+    # Copy non-displaced, non-travel elements first (facilities, breaks, etc.)
+    for idx, element in enumerate(original_schedule):
+        if idx not in displaced_element_indices and not element.get("is_travel", element.get("element_type") == "TRAVEL"):
+            rebuilt_schedule.append(element.copy())
+    
+    # Now insert the cuOpt-optimized travel tasks in the correct order
+    # We'll need to insert them in chronological order based on arrival_stamps
+    optimized_tasks = []
+    
+    for i, task_id in enumerate(task_ids):
+        # Skip depot visits (type might be "Depot" in cuOpt response)
+        if task_id not in task_map:
+            continue
+            
+        task_info = task_map[task_id]
+        arrival_time = arrival_stamps[i] if i < len(arrival_stamps) else None
+        
+        # Estimate start time (arrival - travel time to this location)
+        # For now, use the arrival time as the start
+        if arrival_time is not None:
+            start_min = int(arrival_time)
+            end_min = start_min + task_info["duration"]
+        else:
+            # Fallback to original times or sequential insertion
+            start_min = task_info.get("original_start", 0)
+            end_min = task_info.get("original_end", 0)
+        
+        optimized_task = {
+            "index": len(optimized_tasks),  # Temporary index
+            "element_type": "TRAVEL",
+            "is_travel": True,
+            "from": task_info["from"],
+            "to": task_info["to"],
+            "start_time": f"{start_min//60:02d}:{start_min%60:02d}",
+            "end_time": f"{end_min//60:02d}:{end_min%60:02d}",
+            "start_min": start_min,
+            "end_min": end_min,
+            "priority": task_info["priority"],
+            "load_type": task_info["load_type"],
+            "changes": "OPTIMIZED_BY_CUOPT" if task_info["type"] == "NEW_SERVICE" else "REASSIGNED_BY_CUOPT"
+        }
+        
+        optimized_tasks.append(optimized_task)
+    
+    # Now we need to interleave the fixed elements (facilities, breaks) with the optimized tasks
+    # Sort all elements by start time
+    all_elements = rebuilt_schedule + optimized_tasks
+    all_elements.sort(key=lambda x: x.get("start_min", 0))
+    
+    # Re-index
+    for idx, element in enumerate(all_elements):
+        element["index"] = idx
+    
+    print(f"[cuopt] Rebuilt schedule: {len(all_elements)} total elements ({len(optimized_tasks)} optimized tasks)")
+    
+    return all_elements
+
+def _map_cuopt_vehicle_to_driver(
+    vehicle_key: str,
+    primary_driver_id: str,
+    reassignment_candidates: Dict[str, List[str]],
+    vehicle_index: int
+) -> str:
+    """
+    Map cuOpt vehicle index back to actual driver ID.
+    
+    Vehicle 0 is always the primary driver.
+    Vehicles 1+ are candidates from reassignment_candidates.
+    """
+    
+    if vehicle_index == 0:
+        return primary_driver_id
+    
+    # For secondary vehicles, we need to figure out which candidate driver this is
+    # This is a simplified mapping - you may need more sophisticated logic
+    all_candidates = []
+    for candidates_list in reassignment_candidates.values():
+        all_candidates.extend(candidates_list[:2])  # Top 2 per task
+    
+    # Remove duplicates while preserving order
+    unique_candidates = []
+    seen = {primary_driver_id}
+    for cand in all_candidates:
+        if cand not in seen:
+            unique_candidates.append(cand)
+            seen.add(cand)
+    
+    # Map vehicle index to driver
+    if vehicle_index - 1 < len(unique_candidates):
+        return unique_candidates[vehicle_index - 1]
+    
+    # Fallback
+    print(f"[cuopt] Warning: Could not map vehicle {vehicle_index} to driver")
+    return f"UNKNOWN_DRIVER_{vehicle_index}"
 
 def _build_ui_schedules_from_cascade(
     cascade_result: CascadeCandidateOut,
