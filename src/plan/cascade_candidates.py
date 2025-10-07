@@ -6,6 +6,7 @@ Separate from existing candidates.py to avoid disrupting working code.
 """
 
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
@@ -92,7 +93,7 @@ def generate_cascade_candidates(
         base_driver_candidates = _enhanced_driver_filtering(
             req, DATA, matrices, loc_meta, weekday, req_min, sla_windows,
             calling_point_proximity_miles=50,
-            max_drivers=20
+            max_drivers=req.top_n
         )
         
         if not base_driver_candidates:
@@ -1479,7 +1480,7 @@ def _parse_cascade_cuopt_solution(
         
         # Build "after" schedule from cuOpt solution
         print(f"[cuopt] ✅ Building optimized schedule for {driver_id} from cuOpt route")
-        after_schedule = _rebuild_schedule_from_cuopt_route(
+        after_schedule = _rebuild_schedule_from_cuopt_route_rsl_aware(
             driver_id,
             vehicle_data[vehicle_key],
             before_schedule,
@@ -1527,7 +1528,7 @@ def _parse_cascade_cuopt_solution(
         disposed_p5_tasks=[]
     )
 
-def _rebuild_schedule_from_cuopt_route(
+def _rebuild_schedule_from_cuopt_route_rsl_aware(
     driver_id: str,
     vehicle_route: Dict[str, Any],
     original_schedule: List[Dict[str, Any]],
@@ -1535,133 +1536,779 @@ def _rebuild_schedule_from_cuopt_route(
     displaced_work: List[Dict[str, Any]],
     DATA: Dict[str, Any],
     matrices: Dict[str, Any],
-    weekday: str
+    weekday: str,
+    cost_cfg: Dict[str, float]
 ) -> List[Dict[str, Any]]:
     """
-    Rebuild driver schedule from cuOpt's optimized route.
-    
-    cuOpt returns:
-    - task_id: List of task identifiers (e.g., ["0", "1", "2"] where indices map to tasks)
-    - arrival_stamp: List of arrival times in minutes from start of day
-    - route: List of location indices in the cuOpt problem
-    - type: List of task types
-    
-    We need to:
-    1. Map cuOpt's task IDs back to our actual work elements
-    2. Reconstruct the schedule in the order cuOpt determined
-    3. Use cuOpt's timing information where available
+    RSL-aware duty reconstruction that understands:
+    - START FACILITY (25 min, fixed at home base)
+    - END FACILITY (15 min, fixed at home base)
+    - AS DIRECTED (flexible blocks that can be consumed)
+    - MEAL RELIEF (fixed times, flexible locations)
+    - Empty legs (P5) that can be replaced
+    - Priority-based displacement rules
     """
     
     task_ids = vehicle_route.get("task_id", [])
     arrival_stamps = vehicle_route.get("arrival_stamp", [])
-    route_indices = vehicle_route.get("route", [])
     
-    print(f"[cuopt] Rebuilding route with {len(task_ids)} tasks")
-    print(f"[cuopt] Task order from cuOpt: {task_ids}")
+    print(f"[cuopt] RSL-aware reconstruction for {driver_id}")
+    print(f"[cuopt] cuOpt route: {task_ids}")
     print(f"[cuopt] Arrival times: {arrival_stamps}")
     
-    # Build task mapping: task_id -> actual work element
-    # Task IDs from cuOpt are string indices like "0", "1", "2"
-    # These map to: [0=new_service, 1=displaced_task_1, 2=displaced_task_2, ...]
+    # Build task mapping: cuOpt task ID -> actual work
+    task_map = _build_task_mapping(new_trip_req, displaced_work)
+    
+    # Identify RSL structural elements
+    structure = _identify_rsl_structure(original_schedule)
+    
+    # Determine insertion strategy based on cuOpt's route
+    strategy = _determine_insertion_strategy(
+        task_ids, arrival_stamps, task_map, 
+        structure, original_schedule, matrices
+    )
+    
+    print(f"[cuopt] Insertion strategy: {strategy['type']}")
+    
+    # Reconstruct based on strategy
+    if strategy['type'] == 'empty_replacement':
+        return _reconstruct_empty_replacement(
+            strategy, original_schedule, new_trip_req, matrices, cost_cfg
+        )
+    elif strategy['type'] == 'as_directed_replacement':
+        return _reconstruct_as_directed_replacement(
+            strategy, original_schedule, new_trip_req, matrices, cost_cfg
+        )
+    elif strategy['type'] == 'leg_swap':
+        return _reconstruct_leg_swap(
+            strategy, original_schedule, new_trip_req, displaced_work, matrices, cost_cfg
+        )
+    elif strategy['type'] == 'duty_append':
+        return _reconstruct_duty_append(
+            strategy, original_schedule, new_trip_req, structure, matrices, cost_cfg
+        )
+    else:
+        # Fallback: simple insertion
+        return _reconstruct_simple_insertion(
+            task_ids, task_map, original_schedule, new_trip_req, matrices, cost_cfg
+        )
+
+def _build_task_mapping(
+    new_trip_req: PlanRequest,
+    displaced_work: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Map cuOpt task IDs to actual work elements"""
+    
     task_map = {}
     
-    # Task 0 is always the new service request
+    # Task "0" is the new service
     task_map["0"] = {
         "type": "NEW_SERVICE",
         "from": new_trip_req.start_location,
         "to": new_trip_req.end_location,
         "priority": new_trip_req.priority,
-        "duration": int(new_trip_req.trip_minutes or 60),
-        "load_type": "NEW_SERVICE"
+        "duration": int(new_trip_req.trip_minutes or 60)
     }
     
-    # Tasks 1+ are displaced work items
-    for i, displaced_task in enumerate(displaced_work, start=1):
-        task_id_str = str(i)
-        element = displaced_task.get("element", {})
-        task_map[task_id_str] = {
+    # Tasks 1+ are displaced work
+    for i, task in enumerate(displaced_work, start=1):
+        element = task.get("element", {})
+        task_map[str(i)] = {
             "type": "DISPLACED_WORK",
             "from": element.get("from", ""),
             "to": element.get("to", ""),
             "priority": element.get("priority", 3),
             "duration": element.get("end_min", 0) - element.get("start_min", 0),
-            "load_type": element.get("planz_code", "UNKNOWN"),
-            "original_start": element.get("start_min", 0),
-            "original_end": element.get("end_min", 0)
+            "original_element": element
         }
     
-    # Start with non-displaced elements from original schedule
-    # We need to keep all the fixed elements (START FACILITY, MEAL RELIEF, END FACILITY, etc.)
-    rebuilt_schedule = []
+    return task_map
+
+def _identify_rsl_structure(schedule: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Identify key RSL structural elements"""
     
-    # Track which original elements are being displaced
-    displaced_element_indices = set()
-    for displaced_task in displaced_work:
-        original_element = displaced_task.get("element", {})
-        # Find this element in the original schedule
-        for idx, orig_elem in enumerate(original_schedule):
-            if (orig_elem.get("from") == original_element.get("from") and 
-                orig_elem.get("to") == original_element.get("to") and
-                orig_elem.get("start_min") == original_element.get("start_min")):
-                displaced_element_indices.add(idx)
-                break
+    structure = {
+        "start_facility": None,
+        "end_facility": None,
+        "as_directed_blocks": [],
+        "meal_reliefs": [],
+        "empty_legs": [],
+        "home_base": None
+    }
     
-    # Copy non-displaced, non-travel elements first (facilities, breaks, etc.)
-    for idx, element in enumerate(original_schedule):
-        if idx not in displaced_element_indices and not element.get("is_travel", element.get("element_type") == "TRAVEL"):
-            rebuilt_schedule.append(element.copy())
-    
-    # Now insert the cuOpt-optimized travel tasks in the correct order
-    # We'll need to insert them in chronological order based on arrival_stamps
-    optimized_tasks = []
-    
-    for i, task_id in enumerate(task_ids):
-        # Skip depot visits (type might be "Depot" in cuOpt response)
-        if task_id not in task_map:
-            continue
+    for i, element in enumerate(schedule):
+        et = str(element.get("element_type", "")).upper()
+        
+        if "START FACILITY" in et:
+            structure["start_facility"] = {"index": i, "element": element}
+            structure["home_base"] = element.get("from")
             
-        task_info = task_map[task_id]
-        arrival_time = arrival_stamps[i] if i < len(arrival_stamps) else None
-        
-        # Estimate start time (arrival - travel time to this location)
-        # For now, use the arrival time as the start
-        if arrival_time is not None:
-            start_min = int(arrival_time)
-            end_min = start_min + task_info["duration"]
-        else:
-            # Fallback to original times or sequential insertion
-            start_min = task_info.get("original_start", 0)
-            end_min = task_info.get("original_end", 0)
-        
-        optimized_task = {
-            "index": len(optimized_tasks),  # Temporary index
-            "element_type": "TRAVEL",
-            "is_travel": True,
-            "from": task_info["from"],
-            "to": task_info["to"],
-            "start_time": f"{start_min//60:02d}:{start_min%60:02d}",
-            "end_time": f"{end_min//60:02d}:{end_min%60:02d}",
-            "start_min": start_min,
-            "end_min": end_min,
-            "priority": task_info["priority"],
-            "load_type": task_info["load_type"],
-            "changes": "OPTIMIZED_BY_CUOPT" if task_info["type"] == "NEW_SERVICE" else "REASSIGNED_BY_CUOPT"
-        }
-        
-        optimized_tasks.append(optimized_task)
+        elif "END FACILITY" in et:
+            structure["end_facility"] = {"index": i, "element": element}
+            
+        elif "AS DIRECTED" in et:
+            structure["as_directed_blocks"].append({"index": i, "element": element})
+            
+        elif "MEAL" in et or "RELIEF" in et:
+            structure["meal_reliefs"].append({"index": i, "element": element})
+            
+        elif element.get("is_travel") and element.get("priority", 3) == 5:
+            # Priority 5 = empty leg
+            structure["empty_legs"].append({"index": i, "element": element})
     
-    # Now we need to interleave the fixed elements (facilities, breaks) with the optimized tasks
-    # Sort all elements by start time
-    all_elements = rebuilt_schedule + optimized_tasks
-    all_elements.sort(key=lambda x: x.get("start_min", 0))
+    return structure
+
+def _determine_insertion_strategy(
+    task_ids: List[str],
+    arrival_stamps: List[float],
+    task_map: Dict[str, Dict[str, Any]],
+    structure: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
+    matrices: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Determine how to insert cuOpt's route into the RSL duty"""
+    
+    # Skip depot visits
+    work_tasks = [(tid, arr) for tid, arr in zip(task_ids, arrival_stamps) 
+                  if tid in task_map]
+    
+    if not work_tasks:
+        return {"type": "unknown"}
+    
+    # Get the new service task
+    new_service_task = next((tid for tid, _ in work_tasks if task_map[tid]["type"] == "NEW_SERVICE"), None)
+    if not new_service_task:
+        return {"type": "unknown"}
+    
+    new_service_arrival = next(arr for tid, arr in work_tasks if tid == new_service_task)
+    new_service_info = task_map[new_service_task]
+    
+    # Strategy 1: Check for empty leg replacement
+    for empty_leg in structure["empty_legs"]:
+        elem = empty_leg["element"]
+        # If route matches and timing is close
+        if (elem.get("from", "").upper() == new_service_info["from"].upper() and
+            elem.get("to", "").upper() == new_service_info["to"].upper() and
+            abs(elem.get("start_min", 0) - new_service_arrival) < 60):
+            return {
+                "type": "empty_replacement",
+                "target_index": empty_leg["index"],
+                "target_element": elem,
+                "new_service": new_service_info
+            }
+    
+    # Strategy 2: Check for AS DIRECTED replacement
+    for as_dir in structure["as_directed_blocks"]:
+        elem = as_dir["element"]
+        start = elem.get("start_min", 0)
+        end = elem.get("end_min", 1440)
+        # If new service fits within AS DIRECTED block
+        if start <= new_service_arrival <= end:
+            return {
+                "type": "as_directed_replacement",
+                "target_index": as_dir["index"],
+                "target_element": elem,
+                "new_service": new_service_info,
+                "insertion_time": new_service_arrival
+            }
+    
+    # Strategy 3: Leg swap (displaced existing work)
+    if len(work_tasks) > 1:  # Multiple tasks = something was displaced
+        return {
+            "type": "leg_swap",
+            "new_service": new_service_info,
+            "displaced_tasks": [tid for tid, _ in work_tasks if tid != new_service_task]
+        }
+    
+    # Strategy 4: Duty append (add to end before END FACILITY)
+    return {
+        "type": "duty_append",
+        "new_service": new_service_info,
+        "end_facility_index": structure["end_facility"]["index"] if structure["end_facility"] else len(original_schedule)
+    }
+
+def _reconstruct_empty_replacement(
+    strategy: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
+    new_trip_req: PlanRequest,
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """Replace an empty leg with loaded service - simplest case"""
+    
+    reconstructed = original_schedule.copy()
+    target_idx = strategy["target_index"]
+    target_elem = strategy["target_element"]
+    
+    # Just update the existing element to be loaded
+    reconstructed[target_idx] = {
+        **target_elem,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "EMPTY_REPLACED_BY_CUOPT"
+    }
+    
+    print(f"[cuopt] ✅ Empty leg replaced with loaded service")
+    return reconstructed
+
+def _reconstruct_as_directed_replacement(
+    strategy: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
+    new_trip_req: PlanRequest,
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Replace AS DIRECTED time with complete service sequence"""
+    
+    Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+    
+    reconstructed = []
+    target_idx = strategy["target_index"]
+    as_dir_elem = strategy["target_element"]
+    
+    as_dir_location = as_dir_elem.get("from")
+    service_from = new_trip_req.start_location.upper()
+    service_to = new_trip_req.end_location.upper()
+    
+    # Build service sequence
+    service_sequence = []
+    current_time = int(strategy["insertion_time"])
+    
+    # 1. Deadhead to pickup (if needed)
+    if as_dir_location and as_dir_location.upper() != service_from:
+        if as_dir_location.upper() in loc2idx and service_from in loc2idx:
+            deadhead_time = int(Mtime[loc2idx[as_dir_location.upper()], loc2idx[service_from]])
+            deadhead_miles = float(Mdist[loc2idx[as_dir_location.upper()], loc2idx[service_from]])
+            
+            service_sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": as_dir_location,
+                "to": new_trip_req.start_location,
+                "start_min": current_time,
+                "end_min": current_time + deadhead_time,
+                "priority": 5,
+                "load_type": "EMPTY_DEADHEAD",
+                "changes": "DEADHEAD_ADDED_BY_CUOPT"
+            })
+            current_time += deadhead_time
+    
+    # 2. Loading (30 min)
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.start_location,
+        "start_min": current_time,
+        "end_min": current_time + 30,
+        "priority": new_trip_req.priority,
+        "load_type": "LOADING",
+        "changes": "LOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 30
+    
+    # 3. Service leg
+    service_time = int(new_trip_req.trip_minutes or 60)
+    service_sequence.append({
+        "element_type": "TRAVEL",
+        "is_travel": True,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + service_time,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "OPTIMIZED_BY_CUOPT"
+    })
+    current_time += service_time
+    
+    # 4. Offloading (20 min)
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.end_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + 20,
+        "priority": new_trip_req.priority,
+        "load_type": "OFFLOADING",
+        "changes": "OFFLOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 20
+    
+    # Calculate remaining AS DIRECTED time
+    total_consumed = current_time - int(strategy["insertion_time"])
+    as_dir_duration = as_dir_elem.get("end_min", 0) - as_dir_elem.get("start_min", 0)
+    remaining_as_dir = as_dir_duration - total_consumed
+    
+    # Reconstruct schedule
+    for i, elem in enumerate(original_schedule):
+        if i < target_idx:
+            reconstructed.append(elem)
+        elif i == target_idx:
+            # Insert service sequence
+            reconstructed.extend(service_sequence)
+            # Add remaining AS DIRECTED if significant
+            if remaining_as_dir > 15:  # Only keep if >15 min
+                reconstructed.append({
+                    **as_dir_elem,
+                    "start_min": current_time,
+                    "end_min": current_time + remaining_as_dir,
+                    "changes": "AS_DIRECTED_REDUCED"
+                })
+        else:
+            # Shift subsequent elements
+            shifted = elem.copy()
+            if "start_min" in shifted:
+                shifted["start_min"] += total_consumed
+            if "end_min" in shifted:
+                shifted["end_min"] += total_consumed
+            reconstructed.append(shifted)
     
     # Re-index
-    for idx, element in enumerate(all_elements):
-        element["index"] = idx
+    for idx, elem in enumerate(reconstructed):
+        elem["index"] = idx
     
-    print(f"[cuopt] Rebuilt schedule: {len(all_elements)} total elements ({len(optimized_tasks)} optimized tasks)")
+    print(f"[cuopt] ✅ AS DIRECTED replaced with full service sequence")
+    return reconstructed
+
+def _reconstruct_leg_swap(
+    strategy: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
+    new_trip_req: PlanRequest,
+    displaced_work: List[Dict[str, Any]],
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """
+    Swap/rearrange existing legs when cuOpt displaces work.
+    This happens when the new service displaces existing P3 work.
+    """
     
-    return all_elements
+    Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+    
+    # Find which element was displaced
+    displaced_task_ids = strategy.get("displaced_tasks", [])
+    new_service = strategy["new_service"]
+    
+    reconstructed = []
+    displaced_indices = set()
+    insertion_point = None
+    
+    # First pass: identify which original elements were displaced
+    for i, elem in enumerate(original_schedule):
+        if elem.get("is_travel"):
+            # Check if this matches any displaced work
+            for disp in displaced_work:
+                disp_elem = disp.get("element", {})
+                if (elem.get("from") == disp_elem.get("from") and
+                    elem.get("to") == disp_elem.get("to") and
+                    abs(elem.get("start_min", 0) - disp_elem.get("start_min", 0)) < 5):
+                    displaced_indices.add(i)
+                    if insertion_point is None:
+                        insertion_point = i
+                    break
+    
+    if insertion_point is None:
+        # Fallback if we can't find the displaced element
+        print(f"[cuopt] Warning: Could not identify displaced element, using simple insertion")
+        return _reconstruct_simple_insertion(
+            ["0"], {"0": new_service}, original_schedule, new_trip_req, matrices, cost_cfg
+        )
+    
+    current_time = original_schedule[insertion_point].get("start_min", 0)
+    
+    # Build new service sequence
+    service_sequence = []
+    
+    # Get previous location for deadhead calculation
+    prev_location = None
+    if insertion_point > 0:
+        for i in range(insertion_point - 1, -1, -1):
+            if original_schedule[i].get("is_travel") or original_schedule[i].get("element_type") == "START FACILITY":
+                prev_location = original_schedule[i].get("to") or original_schedule[i].get("from")
+                break
+    
+    service_from = new_trip_req.start_location.upper()
+    service_to = new_trip_req.end_location.upper()
+    
+    # 1. Deadhead to pickup (if needed)
+    if prev_location and prev_location.upper() != service_from:
+        if prev_location.upper() in loc2idx and service_from in loc2idx:
+            deadhead_time = int(Mtime[loc2idx[prev_location.upper()], loc2idx[service_from]])
+            
+            service_sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": prev_location,
+                "to": new_trip_req.start_location,
+                "start_min": current_time,
+                "end_min": current_time + deadhead_time,
+                "priority": 5,
+                "load_type": "EMPTY_DEADHEAD",
+                "changes": "DEADHEAD_ADDED_BY_CUOPT"
+            })
+            current_time += deadhead_time
+    
+    # 2. Loading (30 min)
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.start_location,
+        "start_min": current_time,
+        "end_min": current_time + 30,
+        "priority": new_trip_req.priority,
+        "load_type": "LOADING",
+        "changes": "LOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 30
+    
+    # 3. Service leg
+    service_time = int(new_trip_req.trip_minutes or 60)
+    service_sequence.append({
+        "element_type": "TRAVEL",
+        "is_travel": True,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + service_time,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "OPTIMIZED_BY_CUOPT"
+    })
+    current_time += service_time
+    
+    # 4. Offloading (20 min)
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.end_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + 20,
+        "priority": new_trip_req.priority,
+        "load_type": "OFFLOADING",
+        "changes": "OFFLOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 20
+    
+    # Calculate total time added
+    time_delta = current_time - original_schedule[insertion_point].get("start_min", 0)
+    
+    # Reconstruct schedule
+    for i, elem in enumerate(original_schedule):
+        if i < insertion_point:
+            reconstructed.append(elem)
+        elif i == insertion_point:
+            # Insert service sequence at this point
+            reconstructed.extend(service_sequence)
+        elif i in displaced_indices:
+            # Skip displaced elements (they're being cascaded to other drivers)
+            continue
+        else:
+            # Shift subsequent elements
+            shifted = elem.copy()
+            if "start_min" in shifted:
+                shifted["start_min"] += time_delta
+            if "end_min" in shifted:
+                shifted["end_min"] += time_delta
+            reconstructed.append(shifted)
+    
+    # Re-index
+    for idx, elem in enumerate(reconstructed):
+        elem["index"] = idx
+        # Add timing strings if missing
+        if "start_min" in elem and "start_time" not in elem:
+            elem["start_time"] = f"{int(elem['start_min'])//60:02d}:{int(elem['start_min'])%60:02d}"
+        if "end_min" in elem and "end_time" not in elem:
+            elem["end_time"] = f"{int(elem['end_min'])//60:02d}:{int(elem['end_min'])%60:02d}"
+    
+    print(f"[cuopt] ✅ Leg swap: displaced {len(displaced_indices)} elements, added new service")
+    return reconstructed
+
+def _reconstruct_duty_append(
+    strategy: Dict[str, Any],
+    original_schedule: List[Dict[str, Any]],
+    new_trip_req: PlanRequest,
+    structure: Dict[str, Any],
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """
+    Append new work to end of duty (before END FACILITY).
+    Must include: deadhead from last location, loading, service, offloading, return to base.
+    """
+    
+    Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+    
+    end_facility_idx = strategy["end_facility_index"]
+    home_base = structure.get("home_base")
+    
+    # Find last travel element before END FACILITY
+    last_location = None
+    insert_at = end_facility_idx
+    
+    for i in range(end_facility_idx - 1, -1, -1):
+        elem = original_schedule[i]
+        if elem.get("is_travel") or elem.get("element_type", "").upper() in ["START FACILITY", "LOAD/ASSIST"]:
+            last_location = elem.get("to") or elem.get("from")
+            break
+    
+    if not last_location:
+        last_location = home_base or original_schedule[0].get("from")
+    
+    # Start time is after the element before END FACILITY
+    if insert_at > 0:
+        current_time = original_schedule[insert_at - 1].get("end_min", 0)
+    else:
+        current_time = 0
+    
+    service_from = new_trip_req.start_location.upper()
+    service_to = new_trip_req.end_location.upper()
+    
+    # Build append sequence
+    append_sequence = []
+    
+    # 1. Deadhead to pickup
+    if last_location and last_location.upper() != service_from:
+        if last_location.upper() in loc2idx and service_from in loc2idx:
+            deadhead_time = int(Mtime[loc2idx[last_location.upper()], loc2idx[service_from]])
+            deadhead_miles = float(Mdist[loc2idx[last_location.upper()], loc2idx[service_from]])
+            
+            append_sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": last_location,
+                "to": new_trip_req.start_location,
+                "start_min": current_time,
+                "end_min": current_time + deadhead_time,
+                "priority": 5,
+                "load_type": "EMPTY_DEADHEAD",
+                "changes": "DEADHEAD_ADDED_BY_CUOPT"
+            })
+            current_time += deadhead_time
+    
+    # 2. Loading (30 min)
+    append_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.start_location,
+        "start_min": current_time,
+        "end_min": current_time + 30,
+        "priority": new_trip_req.priority,
+        "load_type": "LOADING",
+        "changes": "LOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 30
+    
+    # 3. Service leg
+    service_time = int(new_trip_req.trip_minutes or 60)
+    append_sequence.append({
+        "element_type": "TRAVEL",
+        "is_travel": True,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + service_time,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "OPTIMIZED_BY_CUOPT"
+    })
+    current_time += service_time
+    
+    # 4. Offloading (20 min)
+    append_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.end_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + 20,
+        "priority": new_trip_req.priority,
+        "load_type": "OFFLOADING",
+        "changes": "OFFLOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 20
+    
+    # 5. Return to home base (if END FACILITY exists and we're not already there)
+    if home_base and service_to != home_base.upper():
+        if service_to in loc2idx and home_base.upper() in loc2idx:
+            return_time = int(Mtime[loc2idx[service_to], loc2idx[home_base.upper()]])
+            
+            append_sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": new_trip_req.end_location,
+                "to": home_base,
+                "start_min": current_time,
+                "end_min": current_time + return_time,
+                "priority": 5,
+                "load_type": "RETURN_TO_BASE",
+                "changes": "RETURN_ADDED_BY_CUOPT"
+            })
+            current_time += return_time
+    
+    # Reconstruct schedule
+    reconstructed = []
+    
+    for i, elem in enumerate(original_schedule):
+        if i < insert_at:
+            reconstructed.append(elem)
+        elif i == insert_at:
+            # Insert append sequence before END FACILITY
+            reconstructed.extend(append_sequence)
+            # Update END FACILITY time
+            if "END FACILITY" in elem.get("element_type", "").upper():
+                updated_end = elem.copy()
+                updated_end["start_min"] = current_time
+                updated_end["end_min"] = current_time + 15  # END FACILITY is 15 min
+                reconstructed.append(updated_end)
+            else:
+                reconstructed.append(elem)
+        else:
+            reconstructed.append(elem)
+    
+    # Re-index
+    for idx, elem in enumerate(reconstructed):
+        elem["index"] = idx
+        # Add timing strings
+        if "start_min" in elem and "start_time" not in elem:
+            elem["start_time"] = f"{int(elem['start_min'])//60:02d}:{int(elem['start_min'])%60:02d}"
+        if "end_min" in elem and "end_time" not in elem:
+            elem["end_time"] = f"{int(elem['end_min'])//60:02d}:{int(elem['end_min'])%60:02d}"
+    
+    print(f"[cuopt] ✅ Duty append: added complete sequence before END FACILITY")
+    return reconstructed
+
+def _reconstruct_simple_insertion(
+    task_ids: List[str],
+    task_map: Dict[str, Dict[str, Any]],
+    original_schedule: List[Dict[str, Any]],
+    new_trip_req: PlanRequest,
+    matrices: Dict[str, Any],
+    cost_cfg: Dict[str, float]
+) -> List[Dict[str, Any]]:
+    """
+    Fallback: simple insertion when we can't determine a better strategy.
+    Insert at the earliest feasible point.
+    """
+    
+    Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
+    
+    # Find first non-structural element to insert after
+    insert_at = 1  # After START FACILITY
+    for i, elem in enumerate(original_schedule):
+        if "START FACILITY" in elem.get("element_type", "").upper():
+            insert_at = i + 1
+            break
+    
+    current_time = original_schedule[insert_at - 1].get("end_min", 0) if insert_at > 0 else 0
+    prev_location = original_schedule[insert_at - 1].get("to") if insert_at > 0 else None
+    
+    service_from = new_trip_req.start_location.upper()
+    service_to = new_trip_req.end_location.upper()
+    
+    # Build service sequence
+    service_sequence = []
+    
+    # Deadhead if needed
+    if prev_location and prev_location.upper() != service_from:
+        if prev_location.upper() in loc2idx and service_from in loc2idx:
+            deadhead_time = int(Mtime[loc2idx[prev_location.upper()], loc2idx[service_from]])
+            
+            service_sequence.append({
+                "element_type": "TRAVEL",
+                "is_travel": True,
+                "from": prev_location,
+                "to": new_trip_req.start_location,
+                "start_min": current_time,
+                "end_min": current_time + deadhead_time,
+                "priority": 5,
+                "load_type": "EMPTY_DEADHEAD",
+                "changes": "DEADHEAD_ADDED_BY_CUOPT"
+            })
+            current_time += deadhead_time
+    
+    # Loading
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.start_location,
+        "start_min": current_time,
+        "end_min": current_time + 30,
+        "priority": new_trip_req.priority,
+        "load_type": "LOADING",
+        "changes": "LOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 30
+    
+    # Service
+    service_time = int(new_trip_req.trip_minutes or 60)
+    service_sequence.append({
+        "element_type": "TRAVEL",
+        "is_travel": True,
+        "from": new_trip_req.start_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + service_time,
+        "priority": new_trip_req.priority,
+        "load_type": "NEW_SERVICE",
+        "changes": "OPTIMIZED_BY_CUOPT"
+    })
+    current_time += service_time
+    
+    # Offloading
+    service_sequence.append({
+        "element_type": "LOAD/ASSIST",
+        "is_travel": False,
+        "from": new_trip_req.end_location,
+        "to": new_trip_req.end_location,
+        "start_min": current_time,
+        "end_min": current_time + 20,
+        "priority": new_trip_req.priority,
+        "load_type": "OFFLOADING",
+        "changes": "OFFLOADING_ADDED_BY_CUOPT"
+    })
+    current_time += 20
+    
+    time_delta = current_time - (original_schedule[insert_at - 1].get("end_min", 0) if insert_at > 0 else 0)
+    
+    # Reconstruct
+    reconstructed = []
+    for i, elem in enumerate(original_schedule):
+        if i < insert_at:
+            reconstructed.append(elem)
+        elif i == insert_at:
+            reconstructed.extend(service_sequence)
+            # Shift this element
+            shifted = elem.copy()
+            if "start_min" in shifted:
+                shifted["start_min"] += time_delta
+            if "end_min" in shifted:
+                shifted["end_min"] += time_delta
+            reconstructed.append(shifted)
+        else:
+            # Shift subsequent elements
+            shifted = elem.copy()
+            if "start_min" in shifted:
+                shifted["start_min"] += time_delta
+            if "end_min" in shifted:
+                shifted["end_min"] += time_delta
+            reconstructed.append(shifted)
+    
+    # Re-index
+    for idx, elem in enumerate(reconstructed):
+        elem["index"] = idx
+        if "start_min" in elem and "start_time" not in elem:
+            elem["start_time"] = f"{int(elem['start_min'])//60:02d}:{int(elem['start_min'])%60:02d}"
+        if "end_min" in elem and "end_time" not in elem:
+            elem["end_time"] = f"{int(elem['end_min'])//60:02d}:{int(elem['end_min'])%60:02d}"
+    
+    print(f"[cuopt] ✅ Simple insertion: added service sequence")
+    return reconstructed
 
 def _map_cuopt_vehicle_to_driver(
     vehicle_key: str,
@@ -1774,21 +2421,42 @@ def generate_cascade_candidates_with_schedules(
             return weekday, 0.0, 0.0, [], []
         
         cascade_solutions = []
-        
-        for base_driver_id in base_driver_candidates[:10]:
-            cascade_solution = _evaluate_cascade_scenario(
-                base_driver_id=base_driver_id,
-                new_trip_req=req,
-                DATA=DATA,
-                matrices=matrices,
-                cost_cfg=cost_cfg,
-                weekday=weekday,
-                sla_windows=sla_windows,
-                max_cascade_depth=max_cascade_depth
-            )
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(
+                    _evaluate_cascade_scenario,
+                    base_driver_id=driver_id,      # Changed to keyword arg
+                    new_trip_req=req,               # Changed to match old code
+                    DATA=DATA,
+                    matrices=matrices,
+                    cost_cfg=cost_cfg,
+                    weekday=weekday,
+                    sla_windows=sla_windows,
+                    max_cascade_depth=max_cascade_depth
+                ): driver_id 
+                for driver_id in base_driver_candidates[:req.top_n]
+            }
             
-            if cascade_solution and cascade_solution.is_fully_feasible:
-                cascade_solutions.append(cascade_solution)
+            for future in as_completed(futures):
+                result = future.result()
+                if result and result.is_fully_feasible:
+                    cascade_solutions.append(result)
+        
+        # for base_driver_id in base_driver_candidates[:req.top_n]:
+        #     cascade_solution = _evaluate_cascade_scenario(
+        #         base_driver_id=base_driver_id,
+        #         new_trip_req=req,
+        #         DATA=DATA,
+        #         matrices=matrices,
+        #         cost_cfg=cost_cfg,
+        #         weekday=weekday,
+        #         sla_windows=sla_windows,
+        #         max_cascade_depth=max_cascade_depth
+        #     )
+            
+        #     if cascade_solution and cascade_solution.is_fully_feasible:
+        #         cascade_solutions.append(cascade_solution)
         
         # Convert to UI format
         final_candidates = []

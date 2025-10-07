@@ -81,8 +81,7 @@ with st.expander("Advanced Options"):
 st.header("2. Find Candidates")
 
 if st.button("Find Candidates", disabled=not (start and end), type="primary", key="find_candidates"):
-    st.write("DEBUG - trip_info:", st.session_state.get('trip_info'))
-    st.write("DEBUG - candidates_data keys:", st.session_state.candidates_data.keys() if st.session_state.candidates_data else None)
+
     payload = {
         "start_location": start,
         "end_location": end,
@@ -103,7 +102,12 @@ if st.button("Find Candidates", disabled=not (start and end), type="primary", ke
             st.session_state.trip_info = {
                 "trip_minutes": data['trip_minutes'],
                 "trip_miles": data['trip_miles'],
-                "weekday": data['weekday']
+                "weekday": data['weekday'],
+                "start": start,
+                "end": end,
+                "mode": mode,
+                "datetime": dt,
+                "priority": priority
             }
             st.session_state.selected_candidate = None  # Reset selection
             
@@ -208,38 +212,99 @@ if st.session_state.selected_candidate:
     with col3:
         st.metric("Overtime Minutes", f"{candidate.get('overtime_minutes', 0):.0f}")
     
-    # Button to get full cascade solution with schedules
+    # Button to show full cascade solution with schedules
     if st.button("Show Full Solution (with cascades)", type="primary"):
         
-        # Get trip details from session state
-        trip_info = st.session_state.get('trip_info', {})
+        # Get the schedule for the selected candidate from already-loaded data
+        schedules_data = st.session_state.candidates_data.get("schedules", [])
+        candidate_schedule = next(
+            (s for s in schedules_data if s.get("driver_id") == candidate.get("driver_id")), 
+            None
+        )
         
-        cascade_payload = {
-            "start_location": trip_info.get('start'),
-            "end_location": trip_info.get('end'),
-            "mode": trip_info.get('mode', 'depart_after'),
-            "when_local": trip_info.get('datetime'),
-            "priority": trip_info.get('priority', 3),
-            "trip_minutes": st.session_state.candidates_data.get('trip_minutes'),  # Required field
-            "trip_miles": st.session_state.candidates_data.get('trip_miles'),      # Required field
-            "max_cascades": 2,
-            "max_drivers_affected": 5,
-            "preferred_candidate_id": candidate.get('candidate_id'),
-            "preferred_driver_id": candidate.get('driver_id')
-        }
+        if candidate_schedule:
+            # Build solution data directly without calling backend again
+            trip_info = st.session_state.get('trip_info', {})
+            
+            solution_data = {
+                "objective_value": candidate.get("est_cost", 0),
+                "weekday": st.session_state.candidates_data.get("weekday"),
+                "trip_minutes": st.session_state.candidates_data.get("trip_minutes"),
+                "trip_miles": st.session_state.candidates_data.get("trip_miles"),
+                "assignments": [{
+                    "trip_id": f"NEW-{trip_info.get('start')}→{trip_info.get('end')}",
+                    "type": "reassigned",
+                    "driver_id": candidate.get("driver_id"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "cost": candidate.get("est_cost", 0),
+                    "deadhead_miles": candidate.get("deadhead_miles", 0),
+                    "overtime_minutes": candidate.get("overtime_minutes", 0),
+                    "delay_minutes": candidate.get("delay_minutes", 0),
+                }],
+                "cascades": [{
+                    "depth": 1,
+                    "displaced_by": "NEW_SERVICE",
+                    "driver_id": candidate.get("driver_id"),
+                    "from": trip_info.get('start'),
+                    "to": trip_info.get('end'),
+                    "priority": trip_info.get('priority'),
+                    "reason": candidate.get("reason", "")
+                }],
+                "schedules": [candidate_schedule]
+            }
+            
+            # Store and display immediately - no backend call needed!
+            st.session_state.solution_data = solution_data
+            st.rerun()
+        else:
+            st.error("Schedule data not available for this candidate")
+
+# if st.session_state.selected_candidate:
+#     candidate = st.session_state.selected_candidate
+    
+#     st.success(f"Selected: Driver {candidate.get('driver_id')} - {candidate.get('candidate_id')}")
+    
+#     # Show candidate metrics
+#     col1, col2, col3 = st.columns(3)
+#     with col1:
+#         st.metric("Cost", f"£{candidate.get('est_cost', 0):.2f}")
+#     with col2:
+#         st.metric("Deadhead Miles", f"{candidate.get('deadhead_miles', 0):.1f}")
+#     with col3:
+#         st.metric("Overtime Minutes", f"{candidate.get('overtime_minutes', 0):.0f}")
+    
+#     # Button to get full cascade solution with schedules
+#     if st.button("Show Full Solution (with cascades)", type="primary"):
         
-        with st.spinner("Computing full cascade solution..."):
-            try:
-                r = requests.post(f"{API}/plan/solve_cascades", json=cascade_payload, timeout=120)
-                r.raise_for_status()
-                solution_data = r.json()
+#         # Get trip details from session state
+#         trip_info = st.session_state.get('trip_info', {})
+        
+#         cascade_payload = {
+#             "start_location": trip_info.get('start'),
+#             "end_location": trip_info.get('end'),
+#             "mode": trip_info.get('mode', 'depart_after'),
+#             "when_local": trip_info.get('datetime'),
+#             "priority": trip_info.get('priority', 3),
+#             "trip_minutes": st.session_state.candidates_data.get('trip_minutes'),  # Required field
+#             "trip_miles": st.session_state.candidates_data.get('trip_miles'),      # Required field
+#             "max_cascades": 2,
+#             "max_drivers_affected": 5,
+#             "preferred_candidate_id": candidate.get('candidate_id'),
+#             "preferred_driver_id": candidate.get('driver_id')
+#         }
+        
+#         with st.spinner("Computing full cascade solution..."):
+#             try:
+#                 r = requests.post(f"{API}/plan/solve_cascades", json=cascade_payload, timeout=120)
+#                 r.raise_for_status()
+#                 solution_data = r.json()
                 
-                # Store solution in session state
-                st.session_state.solution_data = solution_data
-                st.rerun()
+#                 # Store solution in session state
+#                 st.session_state.solution_data = solution_data
+#                 st.rerun()
                 
-            except Exception as e:
-                st.error(f"Failed to compute solution: {e}")
+#             except Exception as e:
+#                 st.error(f"Failed to compute solution: {e}")
     
     # Display solution if available
     if 'solution_data' in st.session_state and st.session_state.solution_data:
