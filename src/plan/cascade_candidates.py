@@ -1488,7 +1488,8 @@ def _parse_cascade_cuopt_solution(
             displaced_work,
             DATA,
             matrices,
-            weekday
+            weekday,
+            cost_cfg 
         )
         
         before_after_schedules[driver_id] = {
