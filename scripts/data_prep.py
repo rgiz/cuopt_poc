@@ -100,28 +100,30 @@ def main(args):
     locs = centers_enriched.dropna(subset=["lat", "lon"]).copy()
 
     # 7) Create stable IDs & index
-    #    - location_id (string): keep the enriched 'location_id' (was 'name' or postcode)
-    #    - matrix_index (int): factorized index for matrices
     locs = locs.reset_index(drop=True)
     locs["matrix_index"] = pd.factorize(locs["location_id"])[0]
     locs = locs.sort_values("matrix_index").reset_index(drop=True)
 
-    # Keep a human-friendly centers file (optional)
-    centers_out = locs.rename(columns={"location_id": "name"})[
-        ["name", "postcode", "lat", "lon", "matrix_index"]
-    ].copy()
-    centers_out.to_csv(out / "centers.csv", index=False)
-
-    # Canonical locations.csv (what the app can load elsewhere)
-    locations_out = locs[["location_id", "postcode", "lat", "lon"]].copy()
-    locations_out.to_csv(out / "locations.csv", index=False)
-
-    # Canonical location_index.csv (the one other scripts use)
-    location_index = locs[["location_id", "matrix_index", "lat", "lon", "postcode"]].copy()
+    # ✅ UPDATED: Output location_index.csv with correct column names
+    location_index = locs[["location_id", "matrix_index", "postcode", "lat", "lon"]].copy()
+    location_index = location_index.rename(columns={
+        "location_id": "name",
+        "matrix_index": "center_id"
+    })
+    # Ensure correct column order expected by all scripts
+    location_index = location_index[["name", "center_id", "postcode", "lat", "lon"]]
     location_index.to_csv(out / "location_index.csv", index=False)
+    
+    # ✅ UPDATED: Output locations.csv (optional, for geo lookups)
+    locations_out = locs[["location_id", "postcode", "lat", "lon"]].copy()
+    locations_out = locations_out.rename(columns={"location_id": "name"})
+    locations_out.to_csv(out / "locations.csv", index=False)
+    
+    # ✅ REMOVED: Delete centers.csv generation (redundant)
+    # The old code that wrote centers.csv is no longer needed
 
     # 8) Map the raw travel legs to indices
-    name_to_id = dict(zip(locs["location_id"], locs["matrix_index"]))  # location_id -> matrix_index
+    name_to_id = dict(zip(locs["location_id"], locs["matrix_index"]))
 
     # Reconstruct from_id/to_id:
     # first map from the normalized strings used when deduping locations

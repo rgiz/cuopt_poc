@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, Field
 from urllib.parse import urljoin
+import os, time
 
 from backend.settings_routes import router as settings_router  # type: ignore
 
@@ -67,56 +68,130 @@ def admin_router() -> APIRouter:
 
     @router.get("/cuopt_selftest")
     def cuopt_selftest():
-        step = "start"
+        """Test cuOpt connectivity using the official client"""
+        step = "import"
         try:
-            model = CuOptModel(
-                driver_states=DATA["driver_states"],
-                distance_miles_matrix=DATA["distance"],
-                time_minutes_matrix=DATA["time"],
-                location_to_index=DATA["location_to_index"],
-                cost_config=COST_CONFIG,
-                server_url=CUOPT_URL,
-                max_solve_time_seconds=10,
+            # Import the official client
+            try:
+                from cuopt_sh_client import CuOptServiceSelfHostClient
+                step = "client_available"
+            except ImportError as e:
+                return {
+                    "ok": False, 
+                    "step": "import_failed", 
+                    "error": f"cuopt-sh-client not installed: {e}"
+                }
+            
+            # Create client
+            step = "create_client"
+            cuopt_host = os.getenv("CUOPT_HOST", "cuopt")
+            cuopt_client = CuOptServiceSelfHostClient(
+                ip=cuopt_host,
+                port=5000,
+                polling_timeout=10,
+                timeout_exception=False
             )
             
-            step = "submit"
-            # Test with proper payload format
-            test_payload = {
-                "fleet_data": {"vehicles": []},
-                "task_data": {"tasks": []},
-                "solver_config": {"time_limit": 5}
+            # Test with minimal valid payload
+            step = "build_payload"
+            test_data = {
+                "cost_matrix_data": {
+                    "data": {"1": [[0, 1], [1, 0]]}  # 2x2 cost matrix
+                },
+                "fleet_data": {
+                    "vehicle_locations": [[0, 0]],   # 1 vehicle at location 0
+                    "vehicle_types": [1],            # Vehicle type 1
+                    "capacities": [[100]]            # Vehicle capacity
+                },
+                "task_data": {
+                    "task_locations": [1],           # 1 task at location 1
+                    "demand": [[1]]                  # Task demand
+                }
             }
             
-            # Try direct synchronous call instead of async
-            if model._solve_path == "cuopt/request":
-                # This endpoint returns results immediately, not a request ID
-                step = "sync_call"
-                result = model._post_json("cuopt/request", test_payload)
-                return {"ok": True, "step": "complete", "result_keys": list(result.keys())}
+            # Submit to cuOpt
+            step = "submit"
+            print(f"[selftest] Testing cuOpt at {cuopt_host}:5000...")
+            solution = cuopt_client.get_optimized_routes(test_data)
+            
+            # Handle async response (repoll if needed)
+            step = "repoll"
+            if "reqId" in solution and "response" not in solution:
+                req_id = solution["reqId"]
+                print(f"[selftest] Repolling reqId: {req_id}")
+                
+                for i in range(10):
+                    solution = cuopt_client.repoll(req_id, response_type="dict")
+                    if "response" in solution:
+                        print(f"[selftest] Repoll successful after {i+1} attempts")
+                        break
+                    import time
+                    time.sleep(0.5)
+            
+            # Check result
+            step = "validate_response"
+            if solution and "response" in solution:
+                solver_response = solution["response"].get("solver_response", {})
+                status = solver_response.get("status", -1)
+                cost = solver_response.get("solution_cost", 0)
+                
+                if status == 0:
+                    return {
+                        "ok": True,
+                        "step": "complete",
+                        "status": status,
+                        "cost": cost,
+                        "message": f"cuOpt server healthy at {cuopt_host}:5000"
+                    }
+                else:
+                    return {
+                        "ok": False,
+                        "step": "solver_failed",
+                        "status": status,
+                        "error": f"Solver returned status {status}"
+                    }
             else:
-                step = "unknown_path"
-                return {"ok": False, "step": step, "error": f"Unexpected solve path: {model._solve_path}"}
+                return {
+                    "ok": False,
+                    "step": "no_response",
+                    "error": "No valid response from cuOpt"
+                }
                 
         except Exception as e:
-            return {"ok": False, "step": step, "error": str(e)}
-
+            import traceback
+            return {
+                "ok": False,
+                "step": step,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+    
     @router.post("/reload")
     def admin_reload():
+        """Reload data from disk"""
         global DATA, COST_CONFIG
-        DATA = load_private_data()
-        COST_CONFIG = read_cost_env_defaults()
-        return {
+        try:
+            DATA = load_private_data()  # ✅ This is the correct function name
+            COST_CONFIG = read_cost_env_defaults()  # ✅ This is also correct
+            return {
                 "status": "ok",
                 "reloaded": {
-                "distance_shape": list(DATA["distance"].shape),
-                "time_shape": list(DATA["time"].shape),
-                "locations": int(DATA["location_index_size"]),
-                "has_driver_states": bool(DATA["driver_states"]),
-                "cost_keys": list(COST_CONFIG.keys()),
-                "has_locations_df": DATA["locations_df"] is not None,
-            },
-        }
-
+                    "distance_shape": list(DATA["distance"].shape),
+                    "time_shape": list(DATA["time"].shape),
+                    "locations": int(DATA["location_index_size"]),
+                    "has_driver_states": bool(DATA["driver_states"]),
+                    "cost_keys": list(COST_CONFIG.keys()),
+                    "has_locations_df": DATA["locations_df"] is not None,
+                },
+            }
+        except Exception as e:
+            import traceback
+            return {
+                "status": "error",
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+    
     return router
 
 # --------------------------------------------------------------------------------------------------
@@ -203,16 +278,30 @@ def _load_npz_any(path: Path) -> np.ndarray:
 
 
 def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
+    """Read locations data for enhanced geo lookups"""
+    
+    # Try locations.csv first (NEW format)
     if LOCATIONS_CSV_FILE.exists():
         try:
             df = pd.read_csv(LOCATIONS_CSV_FILE)
-            if {"Mapped Name A", "Lat_A", "Long_A"}.issubset(df.columns):
+            # Check if it has our new format: name, postcode, lat, lon
+            if {"name", "lat", "lon"}.issubset(df.columns):
+                return pd.DataFrame({
+                    "Mapped Name A": df["name"],
+                    "From Site": df["name"],
+                    "Lat_A": pd.to_numeric(df["lat"], errors="coerce"),
+                    "Long_A": pd.to_numeric(df["lon"], errors="coerce"),
+                    "Mapped Postcode A": df.get("postcode", pd.Series(dtype=str)),
+                })
+            # Fall back to old format if it exists
+            elif {"Mapped Name A", "Lat_A", "Long_A"}.issubset(df.columns):
                 df.setdefault("From Site", df["Mapped Name A"])
                 df.setdefault("Mapped Postcode A", None)
                 return df
         except Exception as e:
             print(f"[startup] WARN: failed to read {LOCATIONS_CSV_FILE.name}: {e}")
 
+    # Try centers.csv as fallback (for backwards compatibility)
     if CENTERS_CSV_FILE.exists():
         try:
             c = pd.read_csv(CENTERS_CSV_FILE)

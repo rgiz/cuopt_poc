@@ -6,23 +6,18 @@ import traceback
 import re
 
 from .models import (
-    PlanRequest, PlanCandidatesResponse, CandidateOut,
-    PlanSolveCascadeRequest, PlanSolveCascadeResponse, AssignmentOut,
-    PlanSolveMultiRequest, PlanSolveMultiResponse, PlanSolutionOut, DriverScheduleOut
+    PlanRequest, PlanCandidatesResponse,
+    PlanSolveCascadeRequest, PlanSolveCascadeResponse, AssignmentOut
 )
 
 from .config import load_priority_map, load_sla_windows
-# from .candidates import generate_candidates, weekday_from_local
-from .candidates import weekday_from_local
 
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, get_location_coordinates, haversine_between_idx
 
+from .candidates import weekday_from_local
 from .cascade_candidates import (
-    generate_cascade_candidates_with_schedules,  # NEW: Enhanced version
-    _compute_cascade_schedules,                  # NEW: For schedule processing  
-    _build_ui_schedules_from_cascade,           # NEW: UI format conversion
-    _enhanced_to_candidate_out,                 # NEW: Enhanced candidate details
-    CascadeCandidateOut                         # NEW: Data class
+    generate_cascade_candidates_with_schedules,  # Use this one
+    CascadeCandidateOut
 )
 
 def create_router(
