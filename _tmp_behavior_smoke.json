@@ -1,0 +1,22 @@
+{
+  "api_base_url": "http://localhost:8000",
+  "in_process": true,
+  "route": {
+    "start_location": "BIRMINGHAM MAIL CENTRE",
+    "end_location": "MIDLANDS SUPER HUB"
+  },
+  "inputs": {
+    "when_local": "2025-09-02T10:30",
+    "priority": 3,
+    "mode": "depart_after"
+  },
+  "status_codes": {
+    "solve_cascades": 200,
+    "solve_multi": 200
+  },
+  "reassigned_counts": {
+    "solve_cascades": 0,
+    "solve_multi": 0
+  },
+  "errors": []
+}

@@ -24,7 +24,6 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, Field
 from urllib.parse import urljoin
-import os, time
 
 from backend.settings_routes import router as settings_router  # type: ignore
 
@@ -34,6 +33,10 @@ except ImportError:
     from ENV_COMPAT_SNIPPET import read_cost_env_defaults  # type: ignore
 
 from src.plan.router import create_router as create_plan_router
+from src.runtime import configure_logging
+from src.driver_states_schema import normalize_driver_states_payload
+
+LOGGER = configure_logging(__name__)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -43,7 +46,7 @@ DEBUG_API = os.getenv("DEBUG_API", "1") == "1"
 BASE_DIR = Path(os.getenv("PRIVATE_DATA_DIR", "./data")).resolve()
 DATASET_DIR = BASE_DIR / "private" / "active" if (BASE_DIR / "private" / "active").exists() else BASE_DIR
 
-print(f"[startup] Using DATASET_DIR: {DATASET_DIR}")
+LOGGER.info("[startup] Using DATASET_DIR: %s", DATASET_DIR)
 
 CUOPT_URL = os.getenv("CUOPT_URL", "http://cuopt:5000").rstrip("/v2").rstrip("/")
 CORS_ALLOW_ORIGINS = os.getenv("CORS_ALLOW_ORIGINS", "*")
@@ -111,19 +114,19 @@ def admin_router() -> APIRouter:
             
             # Submit to cuOpt
             step = "submit"
-            print(f"[selftest] Testing cuOpt at {cuopt_host}:5000...")
+            LOGGER.info("[selftest] Testing cuOpt at %s:5000...", cuopt_host)
             solution = cuopt_client.get_optimized_routes(test_data)
             
             # Handle async response (repoll if needed)
             step = "repoll"
             if "reqId" in solution and "response" not in solution:
                 req_id = solution["reqId"]
-                print(f"[selftest] Repolling reqId: {req_id}")
+                LOGGER.info("[selftest] Repolling reqId: %s", req_id)
                 
                 for i in range(10):
                     solution = cuopt_client.repoll(req_id, response_type="dict")
                     if "response" in solution:
-                        print(f"[selftest] Repoll successful after {i+1} attempts")
+                        LOGGER.info("[selftest] Repoll successful after %d attempts", i + 1)
                         break
                     import time
                     time.sleep(0.5)
@@ -234,9 +237,14 @@ def create_app() -> FastAPI:
         try:
             DATA = load_private_data()
             COST_CONFIG = read_cost_env_defaults()
-            print(f"[startup] Loaded private data OK: D={DATA['distance'].shape}, T={DATA['time'].shape}, locations={DATA['location_index_size']}")
+            LOGGER.info(
+                "[startup] Loaded private data OK: D=%s, T=%s, locations=%s",
+                DATA["distance"].shape,
+                DATA["time"].shape,
+                DATA["location_index_size"],
+            )
         except Exception as e:
-            print(f"[startup] WARN: private data not loaded: {e}")
+            LOGGER.warning("[startup] private data not loaded: %s", e)
         yield
 
     app = FastAPI(title="Dynamic Trip Rescheduling (cuOpt, miles)", lifespan=lifespan)
@@ -299,7 +307,7 @@ def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
                 df.setdefault("Mapped Postcode A", None)
                 return df
         except Exception as e:
-            print(f"[startup] WARN: failed to read {LOCATIONS_CSV_FILE.name}: {e}")
+            LOGGER.warning("[startup] failed to read %s: %s", LOCATIONS_CSV_FILE.name, e)
 
     # Try centers.csv as fallback (for backwards compatibility)
     if CENTERS_CSV_FILE.exists():
@@ -313,7 +321,7 @@ def _maybe_read_locations_df() -> Optional[pd.DataFrame]:
                 "Mapped Postcode A": c.get("postcode", pd.Series(dtype=str)),
             })
         except Exception as e:
-            print(f"[startup] WARN: failed to adapt centers.csv: {e}")
+            LOGGER.warning("[startup] failed to adapt centers.csv: %s", e)
 
     return None
 
@@ -333,11 +341,14 @@ def load_private_data() -> Dict[str, Any]:
     if dist.shape != (n, n) or time.shape != (n, n):
         raise ValueError("Distance/time matrices do not match location_index size.")
 
+    raw_driver_states = json.loads(DRIVER_STATES_FILE.read_text()) if DRIVER_STATES_FILE.exists() else {}
+    driver_states = normalize_driver_states_payload(raw_driver_states)
+
     return {
         "distance": dist,
         "time": time,
         "location_to_index": {str(name).upper(): int(idx) for name, idx in zip(li["name"], li["center_id"])},
-        "driver_states": json.loads(DRIVER_STATES_FILE.read_text()) if DRIVER_STATES_FILE.exists() else {},
+        "driver_states": driver_states,
         "location_index_size": int(n),
         "locations_df": _maybe_read_locations_df(),
     }

@@ -42,12 +42,16 @@ def default_global_settings() -> Dict[str, Any]:
     return {
         "cost_config": {
             "delay_cost_per_minute": 10.0,
-            "deadhead_cost_per_mile": 1.0,
+            "deadhead_cost_per_mile": 2.0,
             "reassignment_admin_cost": 10.0,
             "emergency_rest_penalty": 50.0,
             "outsourcing_base_cost": 200.0,
             "outsourcing_per_mile": 2.0,
-            "overtime_cost_per_minute": 1.0,
+            "overtime_cost_per_minute": 3.0,
+            "rank_deadhead_miles_weight": 1.0,
+            "rank_deadhead_minutes_weight": 0.15,
+            "rank_overtime_minutes_weight": 2.0,
+            "rank_penalty_append": 30.0,
         },
         "sla_penalty": {
             "1": [[15, 2.0], [60, 5.0], [9999, 10.0]],

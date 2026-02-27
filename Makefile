@@ -1,5 +1,5 @@
 
-.PHONY: test test-unit test-integration test-performance test-cuopt test-all
+.PHONY: test test-unit test-integration test-performance test-cuopt test-all smoke-backend smoke-backend-live
 
 # Quick unit tests only
 test:
@@ -54,3 +54,17 @@ test-integration-full:
 	docker-compose up -d cuopt
 	sleep 15
 	TEST_CUOPT_URL=http://localhost:5000 pytest tests/integration/ -v
+
+.PHONY: pipeline
+
+pipeline:
+	python scripts/run_data_pipeline.py --data-dir $${DATA_DIR:-/data}
+
+SMOKE_OUTPUT ?= artifacts/bench/smoke_report.json
+SMOKE_API_BASE_URL ?= http://localhost:8000
+
+smoke-backend:
+	python scripts/smoke_plan_endpoints.py --in-process --output $${SMOKE_OUTPUT}
+
+smoke-backend-live:
+	python scripts/smoke_plan_endpoints.py --api-base-url $${SMOKE_API_BASE_URL} --output $${SMOKE_OUTPUT}

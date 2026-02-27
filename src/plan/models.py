@@ -51,6 +51,18 @@ class PlanRequest(BaseModel):
         le=200,
         description="Limit candidates returned",
     )
+    geography_radius_miles: float = Field(
+        15.0,
+        ge=0.0,
+        le=80.0,
+        description="First-pass pickup geography radius (miles)",
+    )
+    home_base_radius_miles: float = Field(
+        30.0,
+        ge=0.0,
+        le=80.0,
+        description="First-pass home-base-to-delivery radius (miles)",
+    )
 
 
 class PlanSolveCascadeRequest(PlanRequest):
@@ -74,6 +86,8 @@ class CandidateOut(BaseModel):
     feasible_hard: bool = True
     est_cost: float
     reason: Optional[str] = None
+    reason_code: Optional[str] = None
+    reason_detail: Optional[str] = None
 
 
 class PlanCandidatesResponse(BaseModel):
@@ -142,6 +156,8 @@ class PlanSolveMultiRequest(BaseModel):
     max_solutions: int = 5
     trip_minutes: Optional[float] = None
     trip_miles: Optional[float] = None
+    geography_radius_miles: float = 15.0
+    home_base_radius_miles: float = 30.0
     use_cuopt: bool = False              # flip to True to call cuOpt
     seed: Optional[int] = None
 
