@@ -21,5 +21,3 @@ out_private_data/
 
 # Large binaries
 *.exe
-# Generated benchmark artifacts
-artifacts/
