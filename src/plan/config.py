@@ -3,6 +3,8 @@ import os, json
 from pathlib import Path
 from typing import Any, Dict
 
+from src.priority_derivation import normalize_priority_map
+
 def _env_bool(name: str, default: bool) -> bool:
     v = os.getenv(name, str(default)).strip().lower()
     return v in ("1", "true", "yes", "y", "on")
@@ -23,6 +25,7 @@ ENABLE_PARTIAL_OVERLAP_INSERTION = _env_bool("ENABLE_PARTIAL_OVERLAP_INSERTION",
 ENABLE_NEARBY_DEPOT_SUBSTITUTION = _env_bool("ENABLE_NEARBY_DEPOT_SUBSTITUTION", True)
 ENABLE_STRICT_LEGAL_CONSTRAINTS = _env_bool("ENABLE_STRICT_LEGAL_CONSTRAINTS", False)
 ENABLE_TRUE_CASCADE = _env_bool("ENABLE_TRUE_CASCADE", True)
+REQUIRE_CUOPT = _env_bool("REQUIRE_CUOPT", False)
 
 def dataset_dir() -> Path:
     base = Path(os.getenv("PRIVATE_DATA_DIR", "./data/private")).resolve()
@@ -39,7 +42,7 @@ def _load_json(path: Path, default: Any) -> Any:
 
 def load_priority_map() -> Dict[str,int]:
     mp = _load_json(dataset_dir() / "priority_map.json", {})
-    return {str(k).upper(): int(v) for k, v in mp.items()}
+    return normalize_priority_map(mp if isinstance(mp, dict) else {})
 
 def load_sla_windows() -> Dict[int, Dict[str,int]]:
     raw = _load_json(dataset_dir() / "sla_windows.json", {})

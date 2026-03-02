@@ -11,10 +11,12 @@ def clamp_priority(priority: int, default: int = 3) -> int:
 
 
 def normalize_priority_map(priority_map: Dict[str, Any] | None) -> Dict[str, int]:
-    if not priority_map:
+    if not isinstance(priority_map, dict):
         return {}
     normalized: Dict[str, int] = {}
     for key, value in priority_map.items():
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
         normalized[str(key).upper().strip()] = clamp_priority(value)
     return normalized
 
