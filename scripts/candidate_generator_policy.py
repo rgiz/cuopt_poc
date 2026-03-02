@@ -4,8 +4,8 @@ candidate_generator_policy.py
 
 Filters & scores candidates by:
 - Day-of-week match
-- Duty window feasibility (start/finish within availability; supports cross-midnight end)
-- Legal daily limit (<= max_daily_minutes)
+- Duty window feasibility (start/finish within daily_windows; supports cross-midnight end)
+- Legal daily limit (<= default max daily minutes)
 - Computes overtime_minutes (new - baseline, >=0)
 - Computes miles_delta (deadhead + trip_miles over baseline)
 
@@ -21,21 +21,13 @@ import argparse, json
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from src.rsl_helpers import parse_hms_to_minutes
 
 def load_npz_any(p, keys=("matrix","arr","arr_0")):
     z = np.load(p)
     for k in keys:
         if k in z: return z[k]
     return list(z.values())[0]
-
-def minutes(hms):
-    h,m,s = str(hms).split(":")
-    return int(h)*60 + int(m) + int(s)/60.0
-
-def truthy(v):
-    if isinstance(v, (int,float)): return int(v)!=0
-    if not isinstance(v, str): return False
-    return v.strip().lower() in {"y","yes","true","1","t"}
 
 def main(a):
     rsl = pd.read_csv(a.rsl, dtype=str)
@@ -47,8 +39,8 @@ def main(a):
 
     # Baseline per-duty metrics
     rsl["ET"] = rsl["Element Type"].str.upper()
-    rsl["start_min"] = rsl["Commencement Time"].apply(minutes)
-    rsl["end_min"] = rsl["Ending Time"].apply(minutes)
+    rsl["start_min"] = rsl["Commencement Time"].apply(parse_hms_to_minutes)
+    rsl["end_min"] = rsl["Ending Time"].apply(parse_hms_to_minutes)
     travel = rsl[rsl["ET"]=="TRAVEL"].copy()
     travel["Leg Mileage"] = pd.to_numeric(travel["Leg Mileage"], errors="coerce")
 
@@ -66,7 +58,8 @@ def main(a):
     base_df = pd.DataFrame(baseline).set_index("duty_id")
 
     # Drivers
-    states = json.loads(Path(a.drivers).read_text())
+    states_payload = json.loads(Path(a.drivers).read_text())
+    states = states_payload.get("drivers", {}) if isinstance(states_payload, dict) else {}
 
     # Disruptions
     disr = json.loads(Path(a.disruptions).read_text())
@@ -83,21 +76,22 @@ def main(a):
 
         cand_list = []
         for rid, st in states.items():
-            allowed_days = st.get("allowed_days", [])
-            if day and allowed_days and day not in allowed_days:
+            active_days = st.get("days", [])
+            if day and active_days and day not in active_days:
                 continue
 
-            windows = st.get("availability", {}).get(day, [])
-            if not windows:
+            daily_window = (st.get("daily_windows", {}) or {}).get(day)
+            if not isinstance(daily_window, dict):
                 continue
 
-            # Select first window for simplicity
-            w = windows[0]
-            w_start = float(w["start"]); w_end = float(w["end"])  # end may exceed 1440
+            w_start = float(daily_window.get("start_min", 0))
+            w_end = float(daily_window.get("end_min", w_start))
+            if w_end < w_start:
+                w_end += 24 * 60
             arr_min = dep_min + duration
             fits_window = (w_start <= dep_min and arr_min <= w_end)
 
-            max_daily = float(st.get("max_daily_minutes", 13*60))
+            max_daily = float(13 * 60)
 
             if rid in base_df.index:
                 b_minutes = float(base_df.loc[rid, "baseline_minutes"])
