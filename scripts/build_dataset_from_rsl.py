@@ -50,7 +50,7 @@ import time
 import pandas as pd
 import numpy as np
 
-from src.priority_derivation import derive_priority, normalize_priority_map
+from src.priority_derivation import derive_priority
 
 WEEKDAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
@@ -109,7 +109,7 @@ def load_priority_map(path: Path) -> Dict[str, int]:
         return {}
     try:
         mp = json.loads(path.read_text(encoding="utf-8"))
-        return normalize_priority_map(mp if isinstance(mp, dict) else {})
+        return {str(k).upper(): int(v) for k, v in mp.items()}
     except Exception as e:
         print(f"[warn] failed to read priority map at {path}: {e}")
         return {}

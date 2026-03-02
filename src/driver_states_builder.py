@@ -10,20 +10,6 @@ from src.priority_derivation import derive_priority
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 POST_MIDNIGHT_CARRY_CUTOFF_MINUTES = 6 * 60
-TRAVEL_NO_DATA_RULES_KEY = "TRAVEL_NO_DATA_SERVICE_TYPE_PRIORITY"
-
-TRAVEL_NO_DATA_SERVICE_TYPE_PRIORITY: dict[str, int] = {
-    "TRAVELNODATA": 5,
-    "COMMERCIAL": 2,
-    "RMPRESORTNETWORK": 4,
-    "RMMCCOLLECTION": 3,
-    "RMRELAY": 1,
-    "INTERNATIONAL": 4,
-    "RMRDCCOLLECTION": 3,
-    "RMDONETWORK": 1,
-    "PFNETWORK": 1,
-    "RMNATIONALNETWORK": 2,
-}
 
 
 def _normalize_element_type(value: Any) -> str:
@@ -56,41 +42,6 @@ def _to_int_or_default(value: Any, default: int = 0) -> int:
 
 def _canon_col_name(value: Any) -> str:
     return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
-
-
-def _canon_service_type(value: Any) -> str:
-    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
-
-
-def _split_priority_rules(priority_map: dict[str, Any] | None) -> tuple[dict[str, int], dict[str, int]]:
-    base_map: dict[str, int] = {}
-    nested_map: dict[str, int] = {}
-
-    if not isinstance(priority_map, dict):
-        return base_map, dict(TRAVEL_NO_DATA_SERVICE_TYPE_PRIORITY)
-
-    for raw_key, raw_val in priority_map.items():
-        key = str(raw_key or "").upper().strip()
-
-        if key == TRAVEL_NO_DATA_RULES_KEY and isinstance(raw_val, dict):
-            for service_type_key, service_type_priority in raw_val.items():
-                try:
-                    normalized_service = _canon_service_type(service_type_key)
-                    if normalized_service:
-                        nested_map[normalized_service] = int(service_type_priority)
-                except Exception:
-                    continue
-            continue
-
-        try:
-            base_map[key] = int(raw_val)
-        except Exception:
-            continue
-
-    if not nested_map:
-        nested_map = dict(TRAVEL_NO_DATA_SERVICE_TYPE_PRIORITY)
-
-    return base_map, nested_map
 
 
 def _pick_col(columns: list[str], *candidates: str) -> str | None:
@@ -141,18 +92,13 @@ def build_driver_states(
     data["ET_NORM"] = data["Element Type"].apply(_normalize_element_type)
 
     name_to_id = _build_name_to_id_map(location_index_path)
-    base_priority_map, travel_no_data_service_type_map = _split_priority_rules(priority_map)
 
-    due_to_convey_col = _pick_col(
+    load_type_col = _pick_col(
         list(data.columns),
         "Due To Convey",
         "Due to Convey",
         "DueToConvey",
-    )
-    service_type_col = _pick_col(
-        list(data.columns),
         "Service Type",
-        "service_type",
     )
     planz_col = _pick_col(
         list(data.columns),
@@ -251,19 +197,11 @@ def build_driver_states(
             if duration_min < 0:
                 duration_min += 24 * 60
 
-            due_to_convey = "NO_DATA"
-            if due_to_convey_col:
-                raw_due_to_convey = row.get(due_to_convey_col)
-                if raw_due_to_convey is not None and str(raw_due_to_convey).strip():
-                    due_to_convey = str(raw_due_to_convey).upper().strip()
-
-            service_type = "NO_DATA"
-            if service_type_col:
-                raw_service_type = row.get(service_type_col)
-                if raw_service_type is not None and str(raw_service_type).strip():
-                    service_type = str(raw_service_type).upper().strip()
-
-            load_type = due_to_convey if due_to_convey_col else service_type
+            load_type = "NO_DATA"
+            if load_type_col:
+                raw_load_type = row.get(load_type_col)
+                if raw_load_type is not None and str(raw_load_type).strip():
+                    load_type = str(raw_load_type).upper().strip()
             if "TRAVEL" in element_type and load_type == "NO_DATA":
                 load_type = "TRAVEL_NO_DATA"
 
@@ -274,13 +212,7 @@ def build_driver_states(
                     planz_code = str(raw_planz).upper().strip()
 
             raw_priority = row.get(priority_col) if priority_col else None
-            priority = derive_priority(raw_priority, load_type, base_priority_map, default=3)
-
-            if "TRAVEL" in element_type and load_type == "TRAVEL_NO_DATA":
-                service_key = _canon_service_type(service_type)
-                inferred_priority = travel_no_data_service_type_map.get(service_key)
-                if inferred_priority is not None:
-                    priority = int(inferred_priority)
+            priority = derive_priority(raw_priority, load_type, priority_map, default=3)
 
             element: dict[str, Any] = {
                 "element_type": element_type,

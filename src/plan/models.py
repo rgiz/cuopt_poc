@@ -63,12 +63,6 @@ class PlanRequest(BaseModel):
         le=80.0,
         description="First-pass home-base-to-delivery radius (miles)",
     )
-    recovery_minutes: int = Field(
-        0,
-        ge=0,
-        le=240,
-        description="Allowed minutes of same-driver late recovery for displaced downstream work",
-    )
 
 
 class PlanSolveCascadeRequest(PlanRequest):
@@ -128,18 +122,6 @@ class PlanSolveCascadeResponse(BaseModel):
     candidates_considered: int
     cascades: List[Dict[str, Any]]
     schedules: List[DriverScheduleOut] = [] 
-
-
-class RouteWaypoint(BaseModel):
-    lat: float
-    lon: float
-    name: Optional[str] = None
-
-
-class RouteGeometryRequest(BaseModel):
-    waypoints: List[RouteWaypoint] = Field(default_factory=list, min_length=2, max_length=50)
-    profile: str = Field("driving", pattern="^(driving)$")
-    fallback_straight: bool = True
 
 
 # -----------------------------

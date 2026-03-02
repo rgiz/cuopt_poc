@@ -173,12 +173,10 @@ def run_smoke(
     cascades_details = cascades_resp.body.get("details", {}) if isinstance(cascades_resp.body, dict) else {}
     cascades_diag = cascades_details.get("cascade_diagnostics", {}) if isinstance(cascades_details, dict) else {}
     cascades_perf = cascades_details.get("performance", {}) if isinstance(cascades_details, dict) else {}
-    cascades_cuopt_runtime = cascades_details.get("cuopt_runtime", {}) if isinstance(cascades_details, dict) else {}
 
     multi_meta = multi_resp.body.get("meta", {}) if isinstance(multi_resp.body, dict) else {}
     multi_diag = multi_meta.get("cascade_diagnostics", {}) if isinstance(multi_meta, dict) else {}
     multi_perf = multi_meta.get("performance", {}) if isinstance(multi_meta, dict) else {}
-    multi_cuopt_runtime = multi_meta.get("cuopt_runtime", {}) if isinstance(multi_meta, dict) else {}
 
     errors.extend(
         _require_keys(
@@ -234,26 +232,6 @@ def run_smoke(
             "solve_multi.performance",
         )
     )
-    errors.extend(
-        _require_keys(
-            cascades_cuopt_runtime,
-            [
-                "client_imported",
-                "health_check",
-            ],
-            "solve_cascades.cuopt_runtime",
-        )
-    )
-    errors.extend(
-        _require_keys(
-            multi_cuopt_runtime,
-            [
-                "client_imported",
-                "health_check",
-            ],
-            "solve_multi.cuopt_runtime",
-        )
-    )
 
     summary = {
         "api_base_url": api_base_url,
@@ -263,10 +241,6 @@ def run_smoke(
         "status_codes": {
             "solve_cascades": cascades_resp.status_code,
             "solve_multi": multi_resp.status_code,
-        },
-        "cuopt_runtime": {
-            "solve_cascades": cascades_cuopt_runtime,
-            "solve_multi": multi_cuopt_runtime,
         },
         "reassigned_counts": {
             "solve_cascades": sum(
