@@ -1,25 +1,31 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Tuple, Optional, Callable
 from fastapi import APIRouter, HTTPException, Request
+import os
 import sys
 import traceback
 import re
 import time
+import requests
 
 from .models import (
     PlanRequest, PlanCandidatesResponse,
     PlanSolveCascadeRequest, PlanSolveCascadeResponse, AssignmentOut,
-    PlanSolveMultiRequest, PlanSolveMultiResponse, PlanSolutionOut
+    PlanSolveMultiRequest, PlanSolveMultiResponse, PlanSolutionOut,
+    RouteGeometryRequest,
 )
 
 from .config import load_priority_map, load_sla_windows
+from .config import REQUIRE_CUOPT
 
 from .geo import build_loc_meta_from_locations_csv, enhanced_distance_time_lookup, get_location_coordinates, check_matrix_bidirectional, haversine_between_idx
 
 from .candidates import weekday_from_local
 from .cascade_candidates import (
     generate_cascade_candidates_with_schedules,  # Use this one
-    CascadeCandidateOut
+    CascadeCandidateOut,
+    CUOPT_CLIENT_AVAILABLE,
+    _test_official_cuopt_client,
 )
 
 
@@ -103,6 +109,78 @@ def _elapsed_ms(start_ts: float, end_ts: Optional[float] = None) -> float:
     end = time.perf_counter() if end_ts is None else end_ts
     return round((end - start_ts) * 1000.0, 3)
 
+
+def _norm_id(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _cuopt_runtime_status() -> Dict[str, Any]:
+    health: Optional[bool]
+    try:
+        health = bool(_test_official_cuopt_client())
+    except Exception:
+        health = None
+    return {
+        "client_imported": bool(CUOPT_CLIENT_AVAILABLE),
+        "health_check": health,
+    }
+
+
+def _enforce_cuopt_if_required() -> None:
+    if not REQUIRE_CUOPT:
+        return
+    status = _cuopt_runtime_status()
+    if not status.get("client_imported") or not status.get("health_check"):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "cuopt_required_unavailable",
+                "message": "REQUIRE_CUOPT is enabled but cuOpt runtime is unavailable",
+                "cuopt_runtime": status,
+            },
+        )
+
+
+def _build_straight_line_geometry(waypoints: List[Dict[str, Any]]) -> List[List[float]]:
+    geometry: List[List[float]] = []
+    for wp in waypoints:
+        lat = wp.get("lat")
+        lon = wp.get("lon")
+        if lat is None or lon is None:
+            continue
+        geometry.append([float(lon), float(lat)])
+    return geometry
+
+
+def _route_geometry_from_osrm(waypoints: List[Dict[str, Any]], profile: str = "driving") -> Dict[str, Any]:
+    osrm_url = os.getenv("OSRM_URL", "http://osrm:5000").rstrip("/")
+    coords = ";".join(f"{float(w['lon'])},{float(w['lat'])}" for w in waypoints)
+    url = f"{osrm_url}/route/v1/{profile}/{coords}"
+
+    resp = requests.get(
+        url,
+        params={"overview": "full", "geometries": "geojson", "steps": "false"},
+        timeout=5,
+    )
+    resp.raise_for_status()
+
+    data = resp.json()
+    routes = data.get("routes") or []
+    if not routes:
+        raise ValueError("No routes returned from OSRM")
+
+    route = routes[0]
+    coords_geo = (((route.get("geometry") or {}).get("coordinates")) or [])
+    if not coords_geo:
+        raise ValueError("OSRM route geometry missing coordinates")
+
+    return {
+        "source": "osrm",
+        "geometry": coords_geo,
+        "distance_meters": float(route.get("distance") or 0.0),
+        "duration_seconds": float(route.get("duration") or 0.0),
+    }
+
 def create_router(
     get_data: Callable[[], Optional[Dict[str, Any]]],
     get_cost_config: Callable[[], Dict[str, float]],
@@ -178,7 +256,7 @@ def create_router(
         cfg = get_cost_config()
         
         # Use enhanced version that returns schedules
-        weekday, trip_minutes, trip_miles, cands, schedules = generate_cascade_candidates_with_schedules(
+        weekday, trip_minutes, trip_miles, cands, schedules, _filter_diagnostics = generate_cascade_candidates_with_schedules(
             req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
             max_cascade_depth=2, 
             max_candidates=10
@@ -198,6 +276,8 @@ def create_router(
     def plan_and_solve_cascades_enhanced(req: PlanSolveCascadeRequest, request: Request):
         """Enhanced cascade solving with proper UI schedule output"""
         t_total = time.perf_counter()
+        _enforce_cuopt_if_required()
+        cuopt_runtime = _cuopt_runtime_status()
 
         t_ready = time.perf_counter()
         DATA, M, LOC_META = ensure_ready()
@@ -215,7 +295,7 @@ def create_router(
             
             # Generate candidates but filter to only the preferred driver
             t_generation = time.perf_counter()
-            weekday, trip_minutes, trip_miles, all_candidates, all_schedules = generate_cascade_candidates_with_schedules(
+            weekday, trip_minutes, trip_miles, all_candidates, all_schedules, filter_diagnostics = generate_cascade_candidates_with_schedules(
                 req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
                 max_cascade_depth=req.max_cascades,
                 max_candidates=20,  # Generate more to find the preferred one
@@ -225,15 +305,40 @@ def create_router(
             
             # Filter to only the preferred candidate
             t_post = time.perf_counter()
-            candidates = [c for c in all_candidates if c.driver_id == req.preferred_driver_id]
+            preferred_driver_norm = _norm_id(req.preferred_driver_id)
+            preferred_candidate_norm = _norm_id(req.preferred_candidate_id)
+
+            candidates = [
+                c for c in all_candidates
+                if _norm_id(getattr(c, "driver_id", "")) == preferred_driver_norm
+            ]
             preferred_candidate_id = req.preferred_candidate_id
             if preferred_candidate_id:
                 schedules = [
                     s for s in all_schedules
-                    if str(s.get('candidate_id', '')).strip() == str(preferred_candidate_id).strip()
+                    if _norm_id(s.get("candidate_id")) == preferred_candidate_norm
                 ]
             else:
-                schedules = [s for s in all_schedules if s.get('driver_id') == req.preferred_driver_id]
+                schedules = [
+                    s for s in all_schedules
+                    if _norm_id(s.get("driver_id")) == preferred_driver_norm
+                ]
+
+            # Fallback: if preferred-candidate match returns nothing but we have the selected
+            # driver candidate, recover schedules by candidate_id from selected candidate(s).
+            if not schedules and candidates:
+                candidate_ids = {_norm_id(getattr(c, "candidate_id", "")) for c in candidates}
+                schedules = [
+                    s for s in all_schedules
+                    if _norm_id(s.get("candidate_id")) in candidate_ids
+                ]
+
+            # Last fallback for UI continuity: include schedules for the selected primary driver.
+            if not schedules and preferred_driver_norm:
+                schedules = [
+                    s for s in all_schedules
+                    if _norm_id(s.get("driver_id")) == preferred_driver_norm
+                ]
             
             if not candidates:
                 # Fallback: if preferred not found, use all candidates
@@ -244,7 +349,7 @@ def create_router(
         else:
             # No preference - return all candidates
             t_generation = time.perf_counter()
-            weekday, trip_minutes, trip_miles, candidates, schedules = generate_cascade_candidates_with_schedules(
+            weekday, trip_minutes, trip_miles, candidates, schedules, filter_diagnostics = generate_cascade_candidates_with_schedules(
                 req, DATA, M, cfg, LOC_META, SLA_WINDOWS, 
                 max_cascade_depth=req.max_cascades,
                 max_candidates=req.max_cascades
@@ -274,7 +379,9 @@ def create_router(
                     "backend": "cascade-cuopt",
                     "error": "no_candidates",
                     "fallback": "outsourced",
+                    "cuopt_runtime": cuopt_runtime,
                     "cascade_diagnostics": _summarize_cascade_candidates([]),
+                    "candidate_filter_diagnostics": filter_diagnostics,
                     "performance": performance,
                 },
                 candidates_considered=0,
@@ -350,7 +457,9 @@ def create_router(
                 "max_cascades": req.max_cascades,
                 "drivers_touched": len(set(a.driver_id for a in assignments)),
                 "preferred_driver": req.preferred_driver_id,
+                "cuopt_runtime": cuopt_runtime,
                 "cascade_diagnostics": diagnostics,
+                "candidate_filter_diagnostics": filter_diagnostics,
                 "performance": performance,
             },
             candidates_considered=len(candidates),
@@ -361,6 +470,8 @@ def create_router(
     @router.post("/solve_multi", response_model=PlanSolveMultiResponse)
     def plan_solve_multi(req: PlanSolveMultiRequest):
         t_total = time.perf_counter()
+        _enforce_cuopt_if_required()
+        cuopt_runtime = _cuopt_runtime_status()
 
         t_ready = time.perf_counter()
         DATA, M, LOC_META = ensure_ready()
@@ -381,7 +492,7 @@ def create_router(
         )
 
         t_generation = time.perf_counter()
-        weekday, trip_minutes, trip_miles, candidates, schedules = generate_cascade_candidates_with_schedules(
+        weekday, trip_minutes, trip_miles, candidates, schedules, filter_diagnostics = generate_cascade_candidates_with_schedules(
             cascade_req,
             DATA,
             M,
@@ -409,7 +520,13 @@ def create_router(
                     assignments=[outsourced],
                     cascades=[],
                     schedules=[],
-                    details={"backend": "cascade-cuopt", "fallback": "outsourced", "error": "no_candidates"},
+                    details={
+                        "backend": "cascade-cuopt",
+                        "fallback": "outsourced",
+                        "error": "no_candidates",
+                        "cuopt_runtime": cuopt_runtime,
+                        "candidate_filter_diagnostics": filter_diagnostics,
+                    },
                 )
             ]
             build_ms = _elapsed_ms(t_build)
@@ -452,7 +569,9 @@ def create_router(
                         details={
                             "backend": "cascade-cuopt-enhanced",
                             "candidate_id": candidate.candidate_id,
+                            "cuopt_runtime": cuopt_runtime,
                             "cascade_diagnostics": _summarize_cascade_candidates([candidate]),
+                            "candidate_filter_diagnostics": filter_diagnostics,
                         },
                     )
                 )
@@ -477,7 +596,9 @@ def create_router(
             meta={
                 "backend": "cascade-cuopt-enhanced",
                 "solutions_returned": len(solutions),
+                "cuopt_runtime": cuopt_runtime,
                 "cascade_diagnostics": _summarize_cascade_candidates(candidates),
+                "candidate_filter_diagnostics": filter_diagnostics,
                 "performance": performance,
             },
         )
@@ -495,11 +616,50 @@ def create_router(
                 df = df.dropna(subset=["Mapped Name A"]).copy()
                 df["name"] = df["Mapped Name A"].astype(str).str.strip()
                 df["postcode"] = df.get("Mapped Postcode A", None)
-                locs = df[["name", "postcode"]].dropna().drop_duplicates().to_dict(orient="records")
+                lat_col = next((c for c in ["lat", "Lat", "Lat_A"] if c in df.columns), None)
+                lon_col = next((c for c in ["lon", "Lon", "Long", "Long_A"] if c in df.columns), None)
+
+                if lat_col and lon_col:
+                    df["lat"] = df[lat_col]
+                    df["lon"] = df[lon_col]
+                else:
+                    df["lat"] = None
+                    df["lon"] = None
+
+                locs = (
+                    df[["name", "postcode", "lat", "lon"]]
+                    .drop_duplicates(subset=["name"])
+                    .to_dict(orient="records")
+                )
                 return {"locations": locs, "count": len(locs), "source": "memory"}
         except HTTPException:
             pass
         return {"locations": [], "count": 0, "source": "none"}
+
+    @router.post("/route_geometry")
+    def route_geometry(req: RouteGeometryRequest):
+        waypoints: List[Dict[str, Any]] = [
+            {"lat": float(w.lat), "lon": float(w.lon), "name": w.name}
+            for w in req.waypoints
+        ]
+
+        try:
+            result = _route_geometry_from_osrm(waypoints, profile=req.profile)
+            result["waypoints"] = waypoints
+            return result
+        except Exception as e:
+            if not req.fallback_straight:
+                raise HTTPException(status_code=502, detail=f"OSRM route failed: {e}")
+
+            straight = _build_straight_line_geometry(waypoints)
+            return {
+                "source": "straight_fallback",
+                "geometry": straight,
+                "distance_meters": None,
+                "duration_seconds": None,
+                "warning": str(e),
+                "waypoints": waypoints,
+            }
 
     return router
 

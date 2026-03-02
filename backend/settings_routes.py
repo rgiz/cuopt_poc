@@ -20,6 +20,7 @@ GLOBAL_SETTINGS_PATH = PRIVATE_DATA_DIR / "global_settings.json"
 
 DATASETS_DIR = PRIVATE_DATA_DIR / "datasets"
 ACTIVE_LINK = PRIVATE_DATA_DIR / "active"  # symlink or directory
+TRAVEL_NO_DATA_RULES_KEY = "TRAVEL_NO_DATA_SERVICE_TYPE_PRIORITY"
 
 def ensure_dirs():
     PRIVATE_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,7 @@ def default_global_settings() -> Dict[str, Any]:
             "outsourcing_base_cost": 200.0,
             "outsourcing_per_mile": 2.0,
             "overtime_cost_per_minute": 3.0,
+            "score_overtime_weight": 1.25,
             "rank_deadhead_miles_weight": 1.0,
             "rank_deadhead_minutes_weight": 0.15,
             "rank_overtime_minutes_weight": 2.0,
@@ -119,14 +121,34 @@ def get_priority_map(dataset_id: str = Query("active")):
     return JSONResponse(content=load_json(path, {}))
 
 @router.post("/priority_map")
-def post_priority_map(payload: Dict[str, int], dataset_id: str = Query("active")):
-    # Normalize to uppercase keys; keep numeric values
-    normalized = {}
+def post_priority_map(payload: Dict[str, Any], dataset_id: str = Query("active")):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="priority_map payload must be a JSON object")
+
+    normalized: Dict[str, Any] = {}
     for k, v in payload.items():
+        key = str(k).upper().strip()
+        if key == TRAVEL_NO_DATA_RULES_KEY:
+            if not isinstance(v, dict):
+                raise HTTPException(status_code=400, detail=f"Invalid nested rule block for key '{k}'")
+
+            nested: Dict[str, int] = {}
+            for nested_key, nested_val in v.items():
+                try:
+                    nested[str(nested_key).strip()] = max(1, min(5, int(float(nested_val))))
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid nested value for key '{k}.{nested_key}': {nested_val}",
+                    )
+            normalized[key] = nested
+            continue
+
         try:
-            normalized[str(k).upper()] = int(v)
+            normalized[key] = max(1, min(5, int(float(v))))
         except Exception:
             raise HTTPException(status_code=400, detail=f"Invalid value for key '{k}': {v}")
+
     path = priority_path(dataset_id)
     save_json(path, normalized)
     return {"status": "ok", "rows": len(normalized), "message": f"priority_map.json updated ({dataset_id})"}

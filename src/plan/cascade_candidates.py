@@ -14,7 +14,7 @@ Multi-driver cascade logic has been archived - see _archive/multi_driver_cascade
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 import os
 import time
@@ -60,18 +60,29 @@ class CascadeCandidateOut:
     is_fully_feasible: bool
     uncovered_p4_tasks: List[Dict[str, Any]]
     disposed_p5_tasks: List[Dict[str, Any]]
+    deadhead_miles: float = 0.0
+    deadhead_minutes: float = 0.0
+    overtime_minutes: float = 0.0
+    cuopt_base_cost: float = 0.0
+    score_penalty_deadhead: float = 0.0
+    score_penalty_overtime: float = 0.0
+    score_penalty_displaced_priority: float = 0.0
+    unresolved_priority_counts: Dict[str, int] = field(default_factory=dict)
+    strategy_selected: str = ""
+    recovery_eligible: bool = False
+    recovery_used: bool = False
     
     def to_candidate_out(self) -> CandidateOut:
         """Convert to API response format"""
         reason, reason_code, reason_detail = _build_cascade_reason_fields(self)
         return CandidateOut(
-            candidate_id=self.primary_driver_id,
+            candidate_id=self.candidate_id,
             driver_id=self.primary_driver_id,
             type="cascade_optimized",
             est_cost=self.total_system_cost,
-            deadhead_miles=0.0,
+            deadhead_miles=self.deadhead_miles,
             delay_minutes=0.0,
-            overtime_minutes=0.0,
+            overtime_minutes=self.overtime_minutes,
             uses_emergency_rest=False,
             miles_delta=0.0,
             feasible_hard=self.is_fully_feasible,
@@ -95,12 +106,12 @@ def generate_cascade_candidates_with_schedules(
     max_cascade_depth: int = 2,
     max_candidates: int = 10,
     preferred_driver_id: Optional[str] = None,
-) -> Tuple[str, float, float, List[CandidateOut], List[Dict[str, Any]]]:
+) -> Tuple[str, float, float, List[CandidateOut], List[Dict[str, Any]], Dict[str, Any]]:
     """
     Generate candidates using single-driver cuOpt optimization.
     
     Returns:
-        (weekday, trip_minutes, trip_miles, candidates, schedules)
+        (weekday, trip_minutes, trip_miles, candidates, schedules, diagnostics)
     """
     weekday = weekday_from_local(req.when_local)
     req_min = minute_of_day_local(req.when_local)
@@ -113,18 +124,49 @@ def generate_cascade_candidates_with_schedules(
     try:
         pickup_radius = float(getattr(req, "geography_radius_miles", 15.0) or 15.0)
         home_base_radius = float(getattr(req, "home_base_radius_miles", 30.0) or 30.0)
+        relaxed_home_base_radius = max(
+            float(os.getenv("CASCADE_HOME_BASE_RELAXED_RADIUS_MI", "250")),
+            home_base_radius * 4.0,
+        )
 
         # Filter viable drivers
-        base_drivers = _enhanced_driver_filtering(
+        base_drivers, filter_diagnostics = _enhanced_driver_filtering(
             req, DATA, matrices, loc_meta, weekday, req_min, sla_windows,
             calling_point_proximity_miles=pickup_radius,
             home_base_to_delivery_miles=home_base_radius,
             max_drivers=20
         )
+
+        filter_diagnostics = dict(filter_diagnostics or {})
+        filter_diagnostics["home_base_radius_requested_miles"] = home_base_radius
+        filter_diagnostics["home_base_fallback_attempted"] = False
+
+        # If filtering is too strict and returns zero, retry by relaxing home-base radius.
+        if not base_drivers:
+            filter_diagnostics["home_base_fallback_attempted"] = True
+            filter_diagnostics["home_base_fallback_radius_miles"] = relaxed_home_base_radius
+            fallback_drivers, fallback_diag = _enhanced_driver_filtering(
+                req,
+                DATA,
+                matrices,
+                loc_meta,
+                weekday,
+                req_min,
+                sla_windows,
+                calling_point_proximity_miles=pickup_radius,
+                home_base_to_delivery_miles=relaxed_home_base_radius,
+                max_drivers=20,
+            )
+            filter_diagnostics["home_base_fallback_diagnostics"] = fallback_diag
+            if fallback_drivers:
+                base_drivers = fallback_drivers
+                filter_diagnostics["home_base_fallback_used"] = True
+            else:
+                filter_diagnostics["home_base_fallback_used"] = False
         
         if not base_drivers:
             LOGGER.info("[cascade] No viable drivers found")
-            return weekday, 0.0, 0.0, [], []
+            return weekday, 0.0, 0.0, [], [], filter_diagnostics
         
         # Evaluate each driver with cuOpt (parallel)
         cascade_solutions = []
@@ -176,8 +218,9 @@ def generate_cascade_candidates_with_schedules(
                 executor.shutdown(wait=False)
         
         # Convert to API format
+        cascade_solutions.sort(key=lambda s: float(s.total_system_cost))
         final_candidates = [
-            _enhanced_to_candidate_out(sol) 
+            sol.to_candidate_out()
             for sol in cascade_solutions[:max_candidates]
         ]
         
@@ -195,11 +238,14 @@ def generate_cascade_candidates_with_schedules(
             trip_minutes, trip_miles = 0.0, 0.0
         
         LOGGER.info("[cascade] Generated %d candidates with %d schedules", len(final_candidates), len(schedules))
-        return weekday, trip_minutes, trip_miles, final_candidates, schedules
+        return weekday, trip_minutes, trip_miles, final_candidates, schedules, filter_diagnostics
         
     except Exception as e:
         LOGGER.exception("[cascade] Generation failed: %s", e)
-        return weekday, 0.0, 0.0, [], []
+        return weekday, 0.0, 0.0, [], [], {
+            "filter_stage_counts": {},
+            "reject_reason_counts": {"generation_exception": 1},
+        }
 
 
 # ============================================================================
@@ -217,7 +263,7 @@ def _enhanced_driver_filtering(
     calling_point_proximity_miles: float = 50,
     home_base_to_delivery_miles: float = 10,
     max_drivers: int = 100
-) -> List[str]:
+) -> Tuple[List[str], Dict[str, Any]]:
     """Enhanced filtering with calling points proximity logic"""
     
     Mtime, Mdist, loc2idx = matrices["time"], matrices["dist"], matrices["loc2idx"]
@@ -241,6 +287,15 @@ def _enhanced_driver_filtering(
     after_window_filter = 0
     after_calling_points_filter = 0
     after_home_base_filter = 0
+    reject_reason_counts: Dict[str, int] = {
+        "inactive_on_weekday": 0,
+        "invalid_location": 0,
+        "outside_duty_window": 0,
+        "no_calling_point_proximity": 0,
+        "missing_home_base": 0,
+        "invalid_home_to_delivery_distance": 0,
+        "home_base_too_far": 0,
+    }
     
     # INVALID location names to exclude
     INVALID_LOCATIONS = {"NAN", "NO_DATA", "UNKNOWN", "NONE", "", "NULL", "N/A"}
@@ -273,6 +328,7 @@ def _enhanced_driver_filtering(
         elements_all = driver_meta.get("elements", []) or []
         elements = [e for e in elements_all if element_active_on_weekday(e, weekday)]
         if not elements:
+            reject_reason_counts["inactive_on_weekday"] += 1
             continue
         after_day_filter += 1
         
@@ -292,11 +348,13 @@ def _enhanced_driver_filtering(
                 break
         
         if has_invalid_location:
+            reject_reason_counts["invalid_location"] += 1
             continue
         after_nan_filter += 1
         
         # Filter 2: Cross-midnight duty window check
         if not _check_cross_midnight_duty_window(driver_meta, weekday, req_min, req.trip_minutes or 60):
+            reject_reason_counts["outside_duty_window"] += 1
             continue
         after_window_filter += 1
         
@@ -305,18 +363,22 @@ def _enhanced_driver_filtering(
             driver_meta, elements, start_idx, service_time_window,
             int(req.priority), calling_point_proximity_miles, matrices, loc2idx, duty_id
         ):
+            reject_reason_counts["no_calling_point_proximity"] += 1
             continue
         after_calling_points_filter += 1
 
         # Filter 4: Home base should be near DELIVERY location (configurable slider)
         home_base_idx = _resolve_home_base_idx(driver_meta, elements)
         if home_base_idx is None:
+            reject_reason_counts["missing_home_base"] += 1
             continue
 
         home_to_delivery_miles = float(Mdist[home_base_idx, end_idx])
         if home_to_delivery_miles != home_to_delivery_miles:
+            reject_reason_counts["invalid_home_to_delivery_distance"] += 1
             continue
         if home_to_delivery_miles > float(home_base_to_delivery_miles):
+            reject_reason_counts["home_base_too_far"] += 1
             continue
         after_home_base_filter += 1
         
@@ -334,7 +396,20 @@ def _enhanced_driver_filtering(
         after_calling_points_filter,
         after_home_base_filter,
     )
-    return viable_candidates
+    diagnostics = {
+        "filter_stage_counts": {
+            "drivers_total": total_drivers,
+            "after_day_filter": after_day_filter,
+            "after_location_validity_filter": after_nan_filter,
+            "after_duty_window_filter": after_window_filter,
+            "after_calling_points_filter": after_calling_points_filter,
+            "after_home_base_filter": after_home_base_filter,
+            "candidates_selected": len(viable_candidates),
+        },
+        "reject_reason_counts": reject_reason_counts,
+    }
+
+    return viable_candidates, diagnostics
 
 
 def _check_cross_midnight_duty_window(
@@ -511,6 +586,7 @@ def _evaluate_single_driver_with_cuopt(
                     driver_id,
                     new_trip_req,
                     cost,
+                    cost_cfg,
                     DATA,
                     matrices,
                     weekday,
@@ -533,6 +609,7 @@ def _build_cascade_result_from_cuopt(
     driver_id: str,
     new_trip_req: PlanRequest,
     cost: float,
+    cost_cfg: Dict[str, float],
     DATA: Dict[str, Any],
     matrices: Dict[str, Any],
     weekday: str,
@@ -573,6 +650,14 @@ def _build_cascade_result_from_cuopt(
         structure=structure,
         matrices=matrices,
     )
+    recovery_eligible = _is_recovery_eligible(strategy, new_trip_req, matrices)
+    recovery_used = any(
+        str(e.get("changes", "")).upper().strip() in {
+            "OVERLAP_POSTDROP_RECOVERY_DEADHEAD",
+            "OVERLAP_POSTDROP_RECOVERED_SAME_DRIVER",
+        }
+        for e in (after_schedule or [])
+    )
 
     continuity_ok, continuity_reason = _validate_schedule_continuity(after_schedule)
     if not continuity_ok:
@@ -598,6 +683,17 @@ def _build_cascade_result_from_cuopt(
             "after": after_schedule
         }
     }
+
+    deadhead_miles, deadhead_minutes = _estimate_deadhead_from_schedule(after_schedule, matrices)
+    overtime_minutes = _estimate_overtime_minutes(after_schedule, driver_meta, weekday)
+    base_cost = float(cost)
+    deadhead_cost_per_mile = float(cost_cfg.get("deadhead_cost_per_mile", 1.0) or 1.0)
+    overtime_cost_per_minute = float(cost_cfg.get("overtime_cost_per_minute", 1.0) or 1.0)
+    score_deadhead_weight = float(cost_cfg.get("score_deadhead_weight", 1.0) or 1.0)
+    score_overtime_weight = float(cost_cfg.get("score_overtime_weight", 1.25) or 1.25)
+    deadhead_penalty = deadhead_miles * deadhead_cost_per_mile * score_deadhead_weight
+    overtime_penalty = overtime_minutes * overtime_cost_per_minute * score_overtime_weight
+    total_scored_cost = base_cost + deadhead_penalty + overtime_penalty
 
     if ENABLE_TRUE_CASCADE:
         displaced_task = _extract_displaced_task_from_strategy(strategy)
@@ -636,18 +732,167 @@ def _build_cascade_result_from_cuopt(
                     uncovered_p4_tasks.append(task_record)
                 else:
                     disposed_p5_tasks.append(task_record)
+
+    priority_displacement_penalty, unresolved_priority_counts = _compute_priority_displacement_penalty(
+        unresolved_tasks=(uncovered_p4_tasks or []) + (disposed_p5_tasks or []),
+        cost_cfg=cost_cfg,
+    )
+    total_scored_cost += float(priority_displacement_penalty)
     
     return CascadeCandidateOut(
         candidate_id=f"CUOPT_{driver_id}",
         primary_driver_id=driver_id,
-        total_system_cost=float(cost),
+        total_system_cost=float(total_scored_cost),
         drivers_affected=max(1, len(before_after_schedules)),
         cascade_chain=chain,
         before_after_schedules=before_after_schedules,
         is_fully_feasible=bool(home_ok),
         uncovered_p4_tasks=uncovered_p4_tasks,
         disposed_p5_tasks=disposed_p5_tasks,
+        deadhead_miles=float(deadhead_miles),
+        deadhead_minutes=float(deadhead_minutes),
+        overtime_minutes=float(overtime_minutes),
+        cuopt_base_cost=float(base_cost),
+        score_penalty_deadhead=float(deadhead_penalty),
+        score_penalty_overtime=float(overtime_penalty),
+        score_penalty_displaced_priority=float(priority_displacement_penalty),
+        unresolved_priority_counts=unresolved_priority_counts,
+        strategy_selected=str(strategy.get("type", "") or ""),
+        recovery_eligible=bool(recovery_eligible),
+        recovery_used=bool(recovery_used),
         )
+
+
+def _is_recovery_eligible(
+    strategy: Dict[str, Any],
+    new_trip_req: PlanRequest,
+    matrices: Dict[str, Any],
+) -> bool:
+    if str(strategy.get("type", "")).strip().lower() != "overlap_postdrop_replacement":
+        return False
+
+    recovery_window_min = max(0, int(getattr(new_trip_req, "recovery_minutes", 0) or 0))
+    if recovery_window_min <= 0:
+        return False
+
+    displaced_elem = strategy.get("displaced_element") or {}
+    target_elem = strategy.get("target_element") or {}
+    old_drop = str(target_elem.get("to", "") or "").upper().strip()
+    new_drop = str(getattr(new_trip_req, "end_location", "") or "").upper().strip()
+
+    loc2idx = matrices.get("loc2idx", {}) if isinstance(matrices, dict) else {}
+    Mtime = matrices.get("time") if isinstance(matrices, dict) else None
+
+    if not displaced_elem or not old_drop or not new_drop or Mtime is None:
+        return False
+    if old_drop not in loc2idx or new_drop not in loc2idx:
+        return False
+
+    try:
+        bridge_minutes = max(0, int(Mtime[loc2idx[new_drop], loc2idx[old_drop]]))
+    except Exception:
+        bridge_minutes = 0
+
+    displaced_duration = max(
+        1,
+        int(displaced_elem.get("end_min", 0) or 0) - int(displaced_elem.get("start_min", 0) or 0),
+    )
+    required_recovery = bridge_minutes + displaced_duration
+    return required_recovery <= recovery_window_min
+
+
+def _compute_priority_displacement_penalty(
+    unresolved_tasks: List[Dict[str, Any]],
+    cost_cfg: Dict[str, float],
+) -> Tuple[float, Dict[str, int]]:
+    penalties = {
+        1: float(cost_cfg.get("score_displaced_priority_penalty_p1", 5000.0) or 5000.0),
+        2: float(cost_cfg.get("score_displaced_priority_penalty_p2", 1500.0) or 1500.0),
+        3: float(cost_cfg.get("score_displaced_priority_penalty_p3", 250.0) or 250.0),
+        4: float(cost_cfg.get("score_displaced_priority_penalty_p4", 5.0) or 5.0),
+        5: float(cost_cfg.get("score_displaced_priority_penalty_p5", 0.0) or 0.0),
+    }
+    global_weight = float(cost_cfg.get("score_displaced_priority_weight", 1.0) or 1.0)
+
+    priority_counts: Dict[str, int] = {"p1": 0, "p2": 0, "p3": 0, "p4": 0, "p5": 0}
+    penalty_total = 0.0
+    for task in unresolved_tasks or []:
+        try:
+            priority = int(task.get("priority", 5) or 5)
+        except Exception:
+            priority = 5
+        priority = max(1, min(5, priority))
+        priority_counts[f"p{priority}"] += 1
+        penalty_total += penalties[priority]
+
+    return float(penalty_total * global_weight), priority_counts
+
+
+def _estimate_deadhead_from_schedule(schedule: List[Dict[str, Any]], matrices: Dict[str, Any]) -> Tuple[float, float]:
+    loc2idx = matrices.get("loc2idx", {}) if isinstance(matrices, dict) else {}
+    Mtime = matrices.get("time") if isinstance(matrices, dict) else None
+    Mdist = matrices.get("dist") if isinstance(matrices, dict) else None
+
+    deadhead_miles = 0.0
+    deadhead_minutes = 0.0
+    for element in schedule or []:
+        if not bool(element.get("is_travel", False)):
+            continue
+
+        load_type = str(element.get("load_type", "")).upper().strip()
+        planz_code = str(element.get("planz_code", "")).upper().strip()
+        is_deadhead = (
+            "EMPTY" in load_type
+            or "DEADHEAD" in load_type
+            or "RETURN" in load_type
+            or "DEADHEAD" in planz_code
+            or "RETURN" in planz_code
+        )
+        if not is_deadhead:
+            continue
+
+        from_loc = str(element.get("from", "")).upper().strip()
+        to_loc = str(element.get("to", "")).upper().strip()
+        if Mdist is not None and from_loc in loc2idx and to_loc in loc2idx:
+            try:
+                deadhead_miles += float(Mdist[loc2idx[from_loc], loc2idx[to_loc]])
+            except Exception:
+                deadhead_miles += max(0.0, float(element.get("end_min", 0) or 0) - float(element.get("start_min", 0) or 0)) / 60.0
+        else:
+            deadhead_miles += max(0.0, float(element.get("end_min", 0) or 0) - float(element.get("start_min", 0) or 0)) / 60.0
+
+        if Mtime is not None and from_loc in loc2idx and to_loc in loc2idx:
+            try:
+                deadhead_minutes += float(Mtime[loc2idx[from_loc], loc2idx[to_loc]])
+            except Exception:
+                deadhead_minutes += max(0.0, float(element.get("end_min", 0) or 0) - float(element.get("start_min", 0) or 0))
+        else:
+            deadhead_minutes += max(0.0, float(element.get("end_min", 0) or 0) - float(element.get("start_min", 0) or 0))
+
+    return float(deadhead_miles), float(deadhead_minutes)
+
+
+def _estimate_overtime_minutes(schedule: List[Dict[str, Any]], driver_meta: Dict[str, Any], weekday: str) -> float:
+    if not schedule:
+        return 0.0
+
+    daily_windows = driver_meta.get("daily_windows", {}) or {}
+    window = daily_windows.get(weekday)
+    if not isinstance(window, dict):
+        return 0.0
+
+    duty_start = int(window.get("start_min", 0) or 0)
+    duty_end = int(window.get("end_min", 1440) or 1440)
+    schedule_end = max(int(element.get("end_min", element.get("start_min", 0)) or 0) for element in schedule)
+
+    if duty_end <= duty_start:
+        duty_end_actual = duty_end + 1440
+        schedule_end_actual = schedule_end + (1440 if schedule_end < duty_start else 0)
+    else:
+        duty_end_actual = duty_end
+        schedule_end_actual = schedule_end
+
+    return float(max(0, schedule_end_actual - duty_end_actual))
 
 
 def _apply_insertion_strategy_to_schedule(
@@ -657,8 +902,24 @@ def _apply_insertion_strategy_to_schedule(
     structure: Dict[str, Any],
     matrices: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    strategy_type = str(strategy.get('type', '') or '').upper()
+    home_base_name = str((structure or {}).get("home_base", "") or "").upper().strip()
+
+    def _enforce_terminal_closure(schedule: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not schedule or not home_base_name:
+            return schedule
+        closed = _append_terminal_closure_if_missing(
+            rebuilt=[dict(e) for e in schedule],
+            original_schedule=before_schedule,
+            matrices=matrices,
+            change_prefix=strategy_type or "RECONSTRUCT",
+            preferred_terminal_location=home_base_name,
+        )
+        return _finalize_schedule(closed)
+
     if strategy['type'] == 'empty_replacement':
-        return _reconstruct_empty_replacement(strategy, before_schedule, new_trip_req, matrices, {})
+        reconstructed = _reconstruct_empty_replacement(strategy, before_schedule, new_trip_req, matrices, {})
+        return _enforce_terminal_closure(reconstructed)
 
     if strategy['type'] in {
         'leg_replacement',
@@ -666,15 +927,16 @@ def _apply_insertion_strategy_to_schedule(
         'overlap_postdrop_replacement',
         'nearby_substitution_replacement',
     }:
-        return _reconstruct_leg_replacement(strategy, before_schedule, new_trip_req, matrices, {})
+        reconstructed = _reconstruct_leg_replacement(strategy, before_schedule, new_trip_req, matrices, {})
+        return _enforce_terminal_closure(reconstructed)
 
     if strategy['type'] == 'as_directed_replacement' and ENABLE_AS_DIRECTED_INSERTION:
         as_directed_schedule = _reconstruct_as_directed_replacement(
             strategy, before_schedule, new_trip_req, matrices, {}
         )
         if as_directed_schedule is not None:
-            return as_directed_schedule
-        return _reconstruct_duty_append(
+            return _enforce_terminal_closure(as_directed_schedule)
+        reconstructed = _reconstruct_duty_append(
             {"end_facility_index": len(before_schedule)},
             before_schedule,
             new_trip_req,
@@ -682,11 +944,13 @@ def _apply_insertion_strategy_to_schedule(
             matrices,
             {},
         )
+        return _enforce_terminal_closure(reconstructed)
 
     if strategy['type'] == 'duty_append':
-        return _reconstruct_duty_append(strategy, before_schedule, new_trip_req, structure, matrices, {})
+        reconstructed = _reconstruct_duty_append(strategy, before_schedule, new_trip_req, structure, matrices, {})
+        return _enforce_terminal_closure(reconstructed)
 
-    return _reconstruct_duty_append(
+    reconstructed = _reconstruct_duty_append(
         {"end_facility_index": len(before_schedule)},
         before_schedule,
         new_trip_req,
@@ -694,13 +958,29 @@ def _apply_insertion_strategy_to_schedule(
         matrices,
         {},
     )
+    return _enforce_terminal_closure(reconstructed)
 
 
 def _build_driver_schedule(active_elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     schedule: List[Dict[str, Any]] = []
+    day_offset = 0
+    prev_start_min: Optional[int] = None
+
     for element in active_elements:
-        start_min = int(element.get("start_min", 0) or 0)
-        end_min = int(element.get("end_min", start_min) or start_min)
+        raw_start_min = int(element.get("start_min", 0) or 0)
+        raw_end_min = int(element.get("end_min", raw_start_min) or raw_start_min)
+
+        start_min = raw_start_min + day_offset
+        if prev_start_min is not None and start_min < prev_start_min:
+            day_offset += 1440
+            start_min = raw_start_min + day_offset
+
+        end_min = raw_end_min + day_offset
+        if end_min < start_min:
+            end_min += 1440
+
+        prev_start_min = start_min
+
         schedule.append(
             {
                 "index": len(schedule),
@@ -1169,7 +1449,9 @@ def _build_task_mapping(
         "from": new_trip_req.start_location,
         "to": new_trip_req.end_location,
         "priority": new_trip_req.priority,
-        "duration": int(new_trip_req.trip_minutes or 60)
+        "duration": int(new_trip_req.trip_minutes or 60),
+        "mode": str(getattr(new_trip_req, "mode", "depart_after") or "depart_after"),
+        "when_min": int(minute_of_day_local(getattr(new_trip_req, "when_local", "") or "1970-01-01T00:00")),
     }
     
     # For single-driver, we don't have displaced work yet
@@ -1210,7 +1492,7 @@ def _identify_rsl_structure(schedule: List[Dict[str, Any]]) -> Dict[str, Any]:
         elif "END FACILITY" in et:
             structure["end_facility"] = {"index": i, "element": element}
             
-        elif "AS DIRECTED" in et:
+        elif _is_consumable_free_time_element(element):
             structure["as_directed_blocks"].append({"index": i, "element": element})
             
         elif "MEAL" in et or "RELIEF" in et:
@@ -1220,6 +1502,22 @@ def _identify_rsl_structure(schedule: List[Dict[str, Any]]) -> Dict[str, Any]:
             structure["empty_legs"].append({"index": i, "element": element})
     
     return structure
+
+
+def _is_consumable_free_time_element(element: Dict[str, Any]) -> bool:
+    element_type = str(element.get("element_type", "")).upper().strip()
+    if not element_type:
+        return False
+
+    free_time_tokens = (
+        "AS DIRECTED",
+        "AD HOC COLLECTION",
+        "AD-HOC COLLECTION",
+        "AD HOC",
+        "CUSTOMER COLLECTION",
+        "CUSTOMER COLLECT",
+    )
+    return any(token in element_type for token in free_time_tokens)
 
 
 def _determine_insertion_strategy(
@@ -1246,9 +1544,54 @@ def _determine_insertion_strategy(
     
     new_service_arrival = next(arr for tid, arr in work_tasks if tid == new_service_task)
     new_service_info = task_map[new_service_task]
+    request_mode = str(new_service_info.get("mode", "depart_after") or "depart_after").strip().lower()
+    request_time = int(new_service_info.get("when_min", new_service_arrival) or new_service_arrival)
+    service_duration_min = int(new_service_info.get("duration", 0) or 0)
 
     loc2idx = matrices.get("loc2idx", {}) if isinstance(matrices, dict) else {}
+    time_matrix = matrices.get("time") if isinstance(matrices, dict) else None
     dist_matrix = matrices.get("dist") if isinstance(matrices, dict) else None
+
+    req_from = str(new_service_info.get("from", "") or "").upper().strip()
+    req_to = str(new_service_info.get("to", "") or "").upper().strip()
+    if time_matrix is not None and req_from in loc2idx and req_to in loc2idx:
+        try:
+            service_duration_min = max(1, int(time_matrix[loc2idx[req_from], loc2idx[req_to]]))
+        except Exception:
+            pass
+    if service_duration_min <= 0:
+        service_duration_min = 60
+
+    def _free_time_strategy() -> Optional[Dict[str, Any]]:
+        for free_block in structure["as_directed_blocks"]:
+            elem = free_block["element"]
+            start = int(elem.get("start_min", 0) or 0)
+            end = int(elem.get("end_min", start) or start)
+            if end <= start:
+                continue
+
+            if request_mode == "arrive_before":
+                desired_insertion = int(request_time - service_duration_min)
+                if desired_insertion < start:
+                    continue
+                insertion_time = min(end, desired_insertion)
+            else:
+                insertion_time = max(start, int(request_time))
+                if insertion_time > end:
+                    continue
+
+            return {
+                "type": "as_directed_replacement",
+                "target_index": free_block["index"],
+                "target_element": elem,
+                "new_service": new_service_info,
+                "insertion_time": insertion_time,
+            }
+        return None
+
+    preferred_free_time = _free_time_strategy()
+    if preferred_free_time is not None:
+        return preferred_free_time
     
     # Strategy 1: Check for empty leg replacement
     for empty_leg in structure["empty_legs"]:
@@ -1397,21 +1740,7 @@ def _determine_insertion_strategy(
             "new_service": new_service_info,
         }
     
-    # Strategy 2: Check for AS DIRECTED replacement
-    for as_dir in structure["as_directed_blocks"]:
-        elem = as_dir["element"]
-        start = elem.get("start_min", 0)
-        end = elem.get("end_min", 1440)
-        if start <= new_service_arrival <= end:
-            return {
-                "type": "as_directed_replacement",
-                "target_index": as_dir["index"],
-                "target_element": elem,
-                "new_service": new_service_info,
-                "insertion_time": new_service_arrival
-            }
-    
-    # Strategy 3: Default to duty append
+    # Strategy 2: Default to duty append
     return {
         "type": "duty_append",
         "new_service": new_service_info,
@@ -1420,6 +1749,8 @@ def _determine_insertion_strategy(
 
 
 def _finalize_schedule(reconstructed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    reconstructed = _ensure_end_facility_terminal(reconstructed)
+
     for idx, elem in enumerate(reconstructed):
         elem["index"] = idx
         if "start_min" in elem:
@@ -1431,6 +1762,47 @@ def _finalize_schedule(reconstructed: List[Dict[str, Any]]) -> List[Dict[str, An
     if not valid:
         LOGGER.warning("[rsl] Continuity validation warning: %s", reason)
     return reconstructed
+
+
+def _ensure_end_facility_terminal(schedule: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not schedule:
+        return schedule
+
+    end_indices = [
+        idx
+        for idx, elem in enumerate(schedule)
+        if "END FACILITY" in str(elem.get("element_type", "")).upper()
+    ]
+    if not end_indices:
+        return schedule
+
+    terminal_end = dict(schedule[end_indices[-1]])
+    duration = max(
+        1,
+        int(terminal_end.get("end_min", 0) or 0) - int(terminal_end.get("start_min", 0) or 0),
+    )
+
+    end_index_set = set(end_indices)
+    out = [dict(elem) for idx, elem in enumerate(schedule) if idx not in end_index_set]
+    cursor = 0
+    if out:
+        cursor = max(int(elem.get("end_min", elem.get("start_min", 0)) or 0) for elem in out)
+    else:
+        cursor = int(terminal_end.get("start_min", 0) or 0)
+
+    terminal_end["start_min"] = cursor
+    terminal_end["end_min"] = cursor + duration
+
+    existing_change = str(terminal_end.get("changes", "") or "").strip()
+    if "END_FACILITY_MOVED_TO_END" not in existing_change:
+        terminal_end["changes"] = (
+            f"{existing_change}|END_FACILITY_MOVED_TO_END"
+            if existing_change
+            else "END_FACILITY_MOVED_TO_END"
+        )
+
+    out.append(terminal_end)
+    return out
 
 
 def _validate_schedule_continuity(schedule: List[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -1459,6 +1831,116 @@ def _validate_schedule_continuity(schedule: List[Dict[str, Any]]) -> Tuple[bool,
         previous_to = str(element.get("to", "")).upper().strip() or current_from
 
     return True, "ok"
+
+
+def _last_schedule_location(schedule: List[Dict[str, Any]]) -> str:
+    if not schedule:
+        return ""
+    last = schedule[-1]
+    return str(last.get("to", "") or last.get("from", "")).upper().strip()
+
+
+def _append_terminal_closure_if_missing(
+    rebuilt: List[Dict[str, Any]],
+    original_schedule: List[Dict[str, Any]],
+    matrices: Dict[str, Any],
+    change_prefix: str,
+    preferred_terminal_location: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    end_elem = None
+    for idx, elem in enumerate(original_schedule):
+        et = str(elem.get("element_type", "")).upper()
+        if "END FACILITY" in et:
+            end_elem = dict(elem)
+            break
+
+    has_end_facility = any("END FACILITY" in str(e.get("element_type", "")).upper() for e in rebuilt)
+    if end_elem is None and not preferred_terminal_location:
+        return rebuilt
+
+    loc2idx = matrices.get("loc2idx", {}) if isinstance(matrices, dict) else {}
+    Mtime = matrices.get("time") if isinstance(matrices, dict) else None
+
+    current_loc = _last_schedule_location(rebuilt)
+    end_terminal_loc = ""
+    if end_elem is not None:
+        end_terminal_loc = str(end_elem.get("from", "") or end_elem.get("to", "")).upper().strip()
+    preferred_terminal = str(preferred_terminal_location or "").upper().strip()
+    terminal_loc = preferred_terminal or end_terminal_loc
+    cursor = int(rebuilt[-1].get("end_min", rebuilt[-1].get("start_min", 0)) or 0) if rebuilt else int((end_elem or {}).get("start_min", 0) or 0)
+
+    out = [dict(e) for e in rebuilt]
+
+    if has_end_facility and terminal_loc and current_loc == terminal_loc:
+        return out
+
+    if out and terminal_loc and current_loc and current_loc != terminal_loc:
+        last_elem = out[-1]
+        is_loaded_travel = bool(last_elem.get("is_travel", False)) and (
+            "LOADED" in str(last_elem.get("load_type", "")).upper()
+            or "DELIVERY" in str(last_elem.get("planz_code", "")).upper()
+        )
+        if is_loaded_travel:
+            out.append(
+                {
+                    "element_type": "UNLOAD(ASSIST)",
+                    "is_travel": False,
+                    "from": current_loc,
+                    "to": current_loc,
+                    "start_min": cursor,
+                    "end_min": cursor + OFFLOADING_TIME_MINUTES,
+                    "priority": int(last_elem.get("priority", 3) or 3),
+                    "load_type": "OFFLOADING",
+                    "planz_code": "UNLOAD_ASSIST",
+                    "changes": f"{change_prefix}_OFFLOAD_BEFORE_RETURN",
+                }
+            )
+            cursor += OFFLOADING_TIME_MINUTES
+
+    if current_loc and terminal_loc and current_loc != terminal_loc and Mtime is not None and current_loc in loc2idx and terminal_loc in loc2idx:
+        try:
+            deadhead_minutes = max(1, int(Mtime[loc2idx[current_loc], loc2idx[terminal_loc]]))
+        except Exception:
+            deadhead_minutes = 0
+        if deadhead_minutes > 0:
+            out.append(
+                {
+                    "element_type": "TRAVEL",
+                    "is_travel": True,
+                    "from": current_loc,
+                    "to": terminal_loc,
+                    "start_min": cursor,
+                    "end_min": cursor + deadhead_minutes,
+                    "priority": 5,
+                    "load_type": "RETURN_TO_BASE",
+                    "planz_code": "RETURN",
+                    "changes": f"{change_prefix}_RETURN_TO_BASE_RETAINED",
+                }
+            )
+            cursor += deadhead_minutes
+
+    if end_elem is not None:
+        final_end_elem = dict(end_elem)
+    else:
+        final_end_elem = {
+            "element_type": "END FACILITY",
+            "is_travel": False,
+            "from": terminal_loc,
+            "to": terminal_loc,
+            "priority": 3,
+            "load_type": "",
+            "planz_code": "",
+        }
+
+    final_end_elem["from"] = terminal_loc or final_end_elem.get("from", "")
+    final_end_elem["to"] = terminal_loc or final_end_elem.get("to", "")
+    end_duration = max(1, int(final_end_elem.get("end_min", 0) or 0) - int(final_end_elem.get("start_min", 0) or 0))
+    final_end_elem["start_min"] = cursor
+    final_end_elem["end_min"] = cursor + end_duration
+    final_end_elem["changes"] = f"{change_prefix}_END_FACILITY_RETAINED"
+    out.append(final_end_elem)
+
+    return out
 
 
 def _reconstruct_empty_replacement(
@@ -1510,7 +1992,21 @@ def _reconstruct_leg_replacement(
 
     target_start = int(target_elem.get("start_min", 0) or 0)
     req_trip_minutes = getattr(new_trip_req, "trip_minutes", None)
-    service_minutes = int(req_trip_minutes or max(1, int(target_elem.get("end_min", target_start) or target_start) - target_start) or 60)
+    service_minutes = 0
+    if req_trip_minutes is not None:
+        service_minutes = int(req_trip_minutes)
+    if service_minutes <= 0 and Mtime is not None:
+        req_from = str(getattr(new_trip_req, "start_location", "") or "").upper().strip()
+        req_to = str(getattr(new_trip_req, "end_location", "") or "").upper().strip()
+        if req_from in loc2idx and req_to in loc2idx:
+            try:
+                service_minutes = int(Mtime[loc2idx[req_from], loc2idx[req_to]])
+            except Exception:
+                service_minutes = 0
+    if service_minutes <= 0:
+        service_minutes = max(1, int(target_elem.get("end_min", target_start) or target_start) - target_start)
+    if service_minutes <= 0:
+        service_minutes = 60
     new_service_end = target_start + max(1, service_minutes)
     service_from = getattr(new_trip_req, "start_location", target_elem.get("from", ""))
     service_to = getattr(new_trip_req, "end_location", target_elem.get("to", ""))
@@ -1585,10 +2081,12 @@ def _reconstruct_leg_replacement(
         old_drop = str(target_elem.get("to", "")).upper().strip()
         new_drop = str(new_trip_req.end_location).upper().strip()
         displaced_follow_on = strategy.get("displaced_element") or {}
+        recovery_window_min = max(0, int(getattr(new_trip_req, "recovery_minutes", 0) or 0))
 
         rebuilt = [dict(e) for e in reconstructed[: target_idx + 1]]
         cursor = int(rebuilt[-1].get("end_min", new_service_end) or new_service_end)
-        return_inserted = False
+        displaced_chain_started = False
+        current_loc = str(new_trip_req.end_location).upper().strip()
 
         for idx in range(target_idx + 1, len(reconstructed)):
             elem = dict(reconstructed[idx])
@@ -1597,40 +2095,71 @@ def _reconstruct_leg_replacement(
             is_travel = bool(elem.get("is_travel", False))
 
             # Drop local old-drop tasks that are no longer reachable after reroute
-            if not return_inserted and not is_travel and (elem_from == old_drop or elem_to == old_drop):
+            if not is_travel and (elem_from == old_drop or elem_to == old_drop):
                 continue
 
-            # Replace old-drop departure leg with empty return from new drop
-            if not return_inserted and is_travel and elem_from == old_drop:
-                original_duration = max(1, int(elem.get("end_min", 0) or 0) - int(elem.get("start_min", 0) or 0))
-                destination = str(elem.get("to", "")).strip()
-                travel_duration = original_duration
-
-                if Mtime is not None and new_drop in loc2idx and str(destination).upper().strip() in loc2idx:
+            # Drop displaced departure leg from old drop and mark for cascade resolution.
+            if is_travel and elem_from == old_drop:
+                recovered_on_same_driver = False
+                if recovery_window_min > 0 and Mtime is not None and new_drop in loc2idx and old_drop in loc2idx:
                     try:
-                        travel_duration = max(
-                            1,
-                            int(Mtime[loc2idx[new_drop], loc2idx[str(destination).upper().strip()]]),
-                        )
+                        bridge_minutes = max(0, int(Mtime[loc2idx[new_drop], loc2idx[old_drop]]))
                     except Exception:
-                        travel_duration = original_duration
+                        bridge_minutes = 0
 
-                rebuilt.append(
-                    {
-                        **elem,
-                        "from": new_trip_req.end_location,
-                        "to": destination,
-                        "start_min": cursor,
-                        "end_min": cursor + travel_duration,
-                        "priority": 5,
-                        "load_type": "RETURN_TO_BASE",
-                        "planz_code": "RETURN",
-                        "changes": "OVERLAP_POSTDROP_RETURN_RETIMED",
-                    }
-                )
-                cursor += travel_duration
-                return_inserted = True
+                    displaced_duration = max(
+                        1,
+                        int(elem.get("end_min", 0) or 0) - int(elem.get("start_min", 0) or 0),
+                    )
+                    required_recovery = bridge_minutes + displaced_duration
+
+                    if required_recovery <= recovery_window_min:
+                        if bridge_minutes > 0:
+                            rebuilt.append(
+                                {
+                                    "element_type": "TRAVEL",
+                                    "is_travel": True,
+                                    "from": new_trip_req.end_location,
+                                    "to": old_drop,
+                                    "start_min": cursor,
+                                    "end_min": cursor + bridge_minutes,
+                                    "priority": 5,
+                                    "load_type": "EMPTY_DEADHEAD",
+                                    "planz_code": "DEADHEAD",
+                                    "changes": "OVERLAP_POSTDROP_RECOVERY_DEADHEAD",
+                                }
+                            )
+                            cursor += bridge_minutes
+
+                        rebuilt.append(
+                            {
+                                **elem,
+                                "start_min": cursor,
+                                "end_min": cursor + displaced_duration,
+                                "changes": "OVERLAP_POSTDROP_RECOVERED_SAME_DRIVER",
+                            }
+                        )
+                        cursor += displaced_duration
+                        current_loc = elem_to or old_drop
+                        displaced_chain_started = True
+                        recovered_on_same_driver = True
+
+                if recovered_on_same_driver:
+                    continue
+
+                if not displaced_follow_on:
+                    displaced_follow_on = dict(elem)
+                    strategy["displaced_element"] = dict(elem)
+                displaced_chain_started = True
                 continue
+
+            # If displacement chain started, only keep elements that reconnect naturally
+            # from the current location; otherwise they remain displaced.
+            if displaced_chain_started:
+                if is_travel and current_loc and elem_from != current_loc:
+                    continue
+                if not is_travel and current_loc and elem_from and elem_to and elem_from != current_loc and elem_to != current_loc:
+                    continue
 
             # Preserve remaining duty but retime sequentially
             duration = max(0, int(elem.get("end_min", 0) or 0) - int(elem.get("start_min", 0) or 0))
@@ -1638,8 +2167,23 @@ def _reconstruct_leg_replacement(
             elem["end_min"] = cursor + duration
             rebuilt.append(elem)
             cursor += duration
+            current_loc = elem_to or elem_from or current_loc
 
-        reconstructed = rebuilt
+        home_base_name = ""
+        for probe in original_schedule:
+            et_probe = str(probe.get("element_type", "")).upper()
+            if "START FACILITY" in et_probe:
+                home_base_name = str(probe.get("from", "") or probe.get("to", "")).upper().strip()
+                if home_base_name:
+                    break
+
+        reconstructed = _append_terminal_closure_if_missing(
+            rebuilt=rebuilt,
+            original_schedule=original_schedule,
+            matrices=matrices,
+            change_prefix="OVERLAP_POSTDROP",
+            preferred_terminal_location=home_base_name or None,
+        )
 
         # If no follow-on displaced element captured from strategy, infer from old schedule.
         if not displaced_follow_on:
@@ -1690,7 +2234,7 @@ def _reconstruct_as_directed_replacement(
 
     if current_time < load_start_target:
         insertion.append({
-            "element_type": "AS DIRECTED",
+            "element_type": target_elem.get("element_type", "AS DIRECTED"),
             "is_travel": False,
             "from": block_from or block_to,
             "to": block_from or block_to,
@@ -2152,25 +2696,9 @@ def _build_ui_schedules_from_cascade(
 
 def _enhanced_to_candidate_out(cascade_result: CascadeCandidateOut) -> CandidateOut:
     """
-    Enhanced conversion with better details for UI display
+    Compatibility wrapper for legacy tests/callers.
     """
-    reason, reason_code, reason_detail = _build_cascade_reason_fields(cascade_result)
-    
-    return CandidateOut(
-        candidate_id=cascade_result.candidate_id,
-        driver_id=cascade_result.primary_driver_id,
-        type="cascade_optimized",
-        est_cost=cascade_result.total_system_cost,
-        deadhead_miles=0.0,
-        delay_minutes=0.0,
-        overtime_minutes=0.0,
-        uses_emergency_rest=False,
-        miles_delta=0.0,
-        feasible_hard=cascade_result.is_fully_feasible,
-        reason=reason,
-        reason_code=reason_code,
-        reason_detail=reason_detail,
-    )
+    return cascade_result.to_candidate_out()
 
 
 def _build_cascade_reason_fields(cascade_result: CascadeCandidateOut) -> Tuple[str, str, str]:
@@ -2216,9 +2744,25 @@ def _build_cascade_reason_fields(cascade_result: CascadeCandidateOut) -> Tuple[s
         f"chain_depth={chain_depth}; "
         f"assigned_steps={len(assigned_steps)}; "
         f"blocked_steps={len(blocked_steps)}; "
+        f"strategy_selected={str(cascade_result.strategy_selected or '')}; "
+        f"recovery_eligible={bool(cascade_result.recovery_eligible)}; "
+        f"recovery_used={bool(cascade_result.recovery_used)}; "
         f"uncovered_p4={len(cascade_result.uncovered_p4_tasks or [])}; "
         f"disposed_p5={len(cascade_result.disposed_p5_tasks or [])}; "
         f"feasible_hard={bool(cascade_result.is_fully_feasible)}; "
+        f"score_base_cost={float(cascade_result.cuopt_base_cost):.3f}; "
+        f"deadhead_miles={float(cascade_result.deadhead_miles):.3f}; "
+        f"deadhead_minutes={float(cascade_result.deadhead_minutes):.3f}; "
+        f"overtime_minutes={float(cascade_result.overtime_minutes):.3f}; "
+        f"score_penalty_deadhead={float(cascade_result.score_penalty_deadhead):.3f}; "
+        f"score_penalty_overtime={float(cascade_result.score_penalty_overtime):.3f}; "
+        f"score_penalty_displaced_priority={float(cascade_result.score_penalty_displaced_priority):.3f}; "
+        f"unresolved_p1={int((cascade_result.unresolved_priority_counts or {}).get('p1', 0))}; "
+        f"unresolved_p2={int((cascade_result.unresolved_priority_counts or {}).get('p2', 0))}; "
+        f"unresolved_p3={int((cascade_result.unresolved_priority_counts or {}).get('p3', 0))}; "
+        f"unresolved_p4={int((cascade_result.unresolved_priority_counts or {}).get('p4', 0))}; "
+        f"unresolved_p5={int((cascade_result.unresolved_priority_counts or {}).get('p5', 0))}; "
+        f"score_total={float(cascade_result.total_system_cost):.3f}; "
         f"uncovered_p4_tasks={unresolved_p4_serialized}; "
         f"disposed_p5_tasks={unresolved_p5_serialized}"
     )
